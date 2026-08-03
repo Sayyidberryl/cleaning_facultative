@@ -50,20 +50,60 @@ MONTH_NAMES = frozenset({
     "OCTOBER",
 })
 
-INSURED_JUNK_WORDS = frozenset({
-    "PT", "CV", "TBK", "PERSERO", "LTD", "INC", "LLC",
-    "AND", "OR", "THE", "OF", "AS",
-    "NON FOOD", "DIV",
-})
+# =========================
+# INSURED CONFIG
+# =========================
 
-INSURED_SUFFIX_RE = re.compile(
+INSURED_REMOVE_RE = re.compile(
     r"""
-    ,?\s*\bTBK\b\s*(?:,?\s*PT\.?)?
-  | ,?\s*\bPT\.?\s*$
-  | ,?\s*\bCV\.?\s*$
+    \b(
+        PT|CV|TBK|
+        PERSERO|
+        LTD|PTE|INC|LLC|
+        MR|MRS|MS|
+        BAPAK|BPK|IBU|NY|
+        DR|DRS|DRA|IR|H|HJ
+    )\b
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
+INSURED_POLIS_RE = re.compile(
+    r"""
+    (POLIS\s*NO\.?.*)
+    |
+    (POLICY\s*NO\.?.*)
+    |
+    (SLIP\s*NO\.?.*)
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+INSURED_SPLIT_RE = re.compile(
+    r"""
+    \s*,\s*
+    |
+    \s*/\s*
+    |
+    \s+QQ\s+
+    |
+    \s+AND/OR\s+
+    |
+    \s*&\s*
+    |
+    \s*\+\s*
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+INSURED_JUNK_WORDS = {
+    "",
+    "AND",
+    "OR",
+    "THE",
+    "OF",
+    "AS"
+}
 
 # Noise token dalam slip
 _SLIP_NOISE_RE = re.compile(
@@ -194,14 +234,52 @@ def _extract_slip_tokens(text: str) -> list:
 
 
 def _clean_insured_name(name: str) -> str:
-    """Hapus suffix badan usaha (TBK, PT, CV) secara iteratif."""
+
+    if pd.isna(name):
+        return ""
+
+    name = str(name).upper()
+
+    # hapus info polis/slip
+    name = INSURED_POLIS_RE.sub("", name)
+
+    # hapus badan usaha dan gelar
+    name = INSURED_REMOVE_RE.sub(" ", name)
+
+    # ganti karakter
+    name = re.sub(r"[()]", " ", name)
+    name = name.replace("/", " ")
+    name = name.replace("-", " ")
+
+    # rapikan spasi
     name = _normalize_spaces(name)
-    for _ in range(3):
-        cleaned = _normalize_spaces(INSURED_SUFFIX_RE.sub("", name).strip().strip(","))
-        if cleaned == name:
-            break
-        name = cleaned
+
     return name
+
+def split_insured(name):
+
+    if pd.isna(name):
+        return []
+
+    name = str(name)
+
+    parts = INSURED_SPLIT_RE.split(name)
+
+    hasil = []
+
+    for p in parts:
+
+        p = _clean_insured_name(p)
+
+        if not p:
+            continue
+
+        if p in INSURED_JUNK_WORDS:
+            continue
+
+        hasil.append(p)
+
+    return hasil
 
 
 def _cap_or_join(items: list) -> list:
