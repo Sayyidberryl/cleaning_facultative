@@ -5,7 +5,6 @@ from typing import Any, List, Optional
 import numpy as np
 import pandas as pd
 
-
 INPUT_FILE = os.path.join("dataExcel", "raw", "2a. Transaksi Osbal 01.01.23 - 17.07.26 Rev.xlsx")
 SHEET_NAME = "Sheet0"
 OUTPUT_FILE = os.path.join("dataExcel", "processed", "astrabuana_output_osbal.xlsx")
@@ -35,7 +34,13 @@ VARIOUS_STANDALONE_RE = re.compile(r"^\s*VARIOUS(?:\s*\([^)]*\))?(?:\s+(?:INCLUD
 VARIOUS_PREFIX_RE = re.compile(r"^\s*VARIOUS(?:\s*\([^)]*\))?(?:\s+(?:INCLUDE\s+)?FISHING\s+VESSEL)?\s*/\s*", re.IGNORECASE)
 VARIOUS_SUFFIX_RE = re.compile(r"(?:\s*/\s*|\s*,\s*PT\s*/\s*)VARIOUS(?:\s*\([^)]*\))?(?:\s+(?:INCLUDE\s+)?FISHING\s+VESSEL)?\s*$", re.IGNORECASE)
 BORDERO_RE = re.compile(r"\s*\b(?:BORDERO|BORDEROUX)\b.*$", re.IGNORECASE)
-INSURED_ENTITIES_RE = re.compile(r"[,.\s]*\b(PT|CV|TBK|PTE|LTD|PERSERO|PELAYARAN)\b(?!\w)[,.\s]*", re.IGNORECASE)
+
+# entitas hukum & divisi (beserta pemisah koma/titik/spasi di sekitarnya)
+INSURED_ENTITIES_RE = re.compile(
+    r"[,.\s]*\b(PT|CV|TBK|PTE|LTD|PERSERO|PELAYARAN|DIV|DIVISI|DIVISION)\b\.?[,.\s]*",
+    re.IGNORECASE,
+)
+
 TRAILING_SINGLE_LETTER_TYPO_RE = re.compile(r"[,.\s]+\b[A-Za-z]\b$", re.IGNORECASE)
 BRANCH_ANNOTATION_RE = re.compile(r"\bCAB(?:ANG)?(?:\s*\.\s*|\s+)[A-Z0-9_.]+\b|\bCAB(?:ANG)?\b", re.IGNORECASE)
 PAREN_ANNOTATIONS_RE = re.compile(r"\([^)]*KNOWN\s+AS[^)]*\)|\(\s*APARTEMEN\b[^\)]*\)|\(\s*PERSERO\s*\)|\(\s*[A-Z0-9]\s*\)", re.IGNORECASE)
@@ -46,12 +51,12 @@ STRIP_LABEL_CLEAN_RE = re.compile(r"^[\s/\-:,.+]+|[\s/\-:,.+]+$")
 TBA_VAR_RE = re.compile(r"\b(TBA|VARIOUS|VAR)\b", re.IGNORECASE)
 NON_ALPHANUM_RE = re.compile(r"[^A-Za-z0-9]")
 MULTIPLE_SPACES_RE = re.compile(r"\s+")
+
 POLIS_VALID_FORMAT_RE = re.compile(r"\d{11,}")
 POLIS_SUFFIX_FORMAT_RE = re.compile(r"\d{7,10}[+,\-]\d{2,4}")
 RANGE_PATTERN_RE = re.compile(r"[A-Za-z]{2,8}\d{8,}")
 ABBREVIATION_RE = re.compile(r"\b(?:[A-Za-z]\.){2,}")
 
-# Dideteksi otomatis -> mapping manual per kasus
 MANUAL_INSURED_SPLIT = {
     "CEMERLANG COKE INDUSTRIAL SDN BHD AMBANK ISLAMIC BERHAD F.T.": [
         "CEMERLANG COKE INDUSTRIAL SDN BHD",
@@ -59,6 +64,7 @@ MANUAL_INSURED_SPLIT = {
     ],
 }
 
+# helper function
 def _clean_code(text: Any) -> str:
     return NON_ALPHANUM_RE.sub("", str(text)).upper()
 
@@ -228,22 +234,22 @@ def _proses_satu_segmen(text: str, wajib_11_digit: bool, acuan_awal: Optional[st
 
     return hasil_breakdown
 
+# cleaning & breakdown function
 def clean_insured(name: Any) -> str:
     if pd.isna(name):
         return ""
 
     name_str = str(name)
+ 
     name_str = PAREN_ANNOTATIONS_RE.sub("", name_str)
     name_str = BRANCH_ANNOTATION_RE.sub("", name_str)
     name_str = TRAILING_SINGLE_LETTER_TYPO_RE.sub("", name_str)
+
     name_str = INSURED_ENTITIES_RE.sub(" ", name_str)
-    
-    # merapikan koma dan titik tanpa merusak singkatan
-    name_str = re.sub(r",", " ", name_str)
-    name_str = re.sub(r"\.\s+$", "", name_str)
-    name_str = re.sub(r"^[\s/\-:,.+&;]+|[\s/\-:,.+&;]+$", "", name_str)
-    
+
+    name_str = re.sub(r"[.,/\\:;&+\-]", " ", name_str)
     cleaned = MULTIPLE_SPACES_RE.sub(" ", name_str).strip()
+
     return cleaned.upper() if len(cleaned) > 1 else ""
 
 def preprocess_insured_text(raw_str: str) -> str:
@@ -251,6 +257,8 @@ def preprocess_insured_text(raw_str: str) -> str:
     text = VARIOUS_SUFFIX_RE.sub("", text)
     text = BORDERO_RE.sub("", text)
     text = PAREN_ANNOTATIONS_RE.sub("", text)
+
+    text = INSURED_ENTITIES_RE.sub(" ", text)
     return text.strip()
 
 def breakdown_insured(value: Any) -> List[str]:
@@ -284,16 +292,12 @@ def breakdown_insured(value: Any) -> List[str]:
 
     return cleaned_parts if cleaned_parts else [clean_insured(raw_str)]
 
-
 def breakdown_polis_atau_slip(value: Any, wajib_11_digit: bool) -> List[str]:
-    """Fungsi generic untuk memecah Polis atau Slip."""
     if pd.isna(value):
         return [value]
 
     raw = str(value).strip().upper()
-    if not raw:
-        return [raw]
-    if not _mengandung_kode_panjang(raw):
+    if not raw or not _mengandung_kode_panjang(raw):
         return [raw]
 
     text = _hapus_kata_label(raw)
@@ -346,7 +350,6 @@ def _insert_breakdown_columns(
     is_astrabuana_mask: pd.Series, 
     max_cols_target: int = MAX_HASIL_BREAKDOWN
 ) -> None:
-    """Mengaplikasikan fungsi breakdown dan memecahnya ke kolom-kolom baru."""
     hasil_breakdown = df.apply(
         lambda row: fn_breakdown(row[source_col]) if is_astrabuana_mask[row.name] else [],
         axis=1

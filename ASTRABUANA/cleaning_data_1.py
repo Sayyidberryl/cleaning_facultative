@@ -27,6 +27,9 @@ class Patterns:
     NON_ALPHANUM = re.compile(r"[^A-Za-z0-9]")
     MULTIPLE_SPACES = re.compile(r"\s{2,}")
     
+    # Regex khusus menghapus titik setelah PT (e.g., "PT." -> "PT")
+    CLEAN_PT_DOT = re.compile(r"\bPT\s*\.\s*", re.IGNORECASE)
+    
     # Policy Specific
     POLIS_VALID_FORMAT = re.compile(r"\d{11,}")
     POLIS_SUFFIX_FORMAT = re.compile(r"\d{7,10}[+,\-]\d{2,4}")
@@ -108,6 +111,23 @@ class Patterns:
     )
     BORDERO_DATE_RANGE = re.compile(r"\b\d{6}\s*-\s*\d{6}\b")
     TOKEN_SAMPAH_SPASI = re.compile(r"^(?:VAR|TBA|VARIOUS|END(?:\.\d+)?|P\d{1,3})$", re.IGNORECASE)
+
+def get_business_partners(comp_name2, comp_name) -> str:
+    """
+    Tentukan BUSINESS_PARTNERS:
+    - Jika COMP_NAME2 kosong / 'DIRECT' -> gunakan COMP_NAME
+    - Jika tidak -> gunakan COMP_NAME2
+    - Hapus titik setelah 'PT' (misal: "PT. JBBODA" menjadi "PT JBBODA")
+    """
+    broker = "" if pd.isna(comp_name2) else str(comp_name2).strip()
+    if not broker or broker.upper() == "DIRECT":
+        val = "" if pd.isna(comp_name) else str(comp_name).strip()
+    else:
+        val = broker
+        
+    # Hapus titik setelah PT dan rapikan spasi berlebih
+    val = Patterns.CLEAN_PT_DOT.sub("PT ", val)
+    return Patterns.MULTIPLE_SPACES.sub(" ", val).strip()
 
 def _normalisasi_as_per_list(text: str) -> str:
     return Patterns.AS_PER_LIST.sub("AS PER LIST", text)
@@ -987,6 +1007,18 @@ def process_data(input_file: str, sheet_name: str, output_file: str) -> None:
     if df.empty:
         print("[WARN] Data kosong setelah filter. Proses dihentikan.")
         return
+
+    # --- PENAMBAHAN KOLOM BUSINESS_PARTNERS ---
+    if "COMP_NAME2" in df.columns:
+        print("Menambahkan kolom BUSINESS_PARTNERS ...")
+        bp_series = df.apply(
+            lambda row: get_business_partners(row.get("COMP_NAME2"), row.get(CEDANT_COL)),
+            axis=1
+        )
+        pos_comp2 = df.columns.get_loc("COMP_NAME2")
+        df.insert(pos_comp2 + 1, "BUSINESS_PARTNERS", bp_series)
+    else:
+        print("[WARN] Kolom COMP_NAME2 tidak ditemukan. Kolom BUSINESS_PARTNERS dilewati.")
 
     print("Menjalankan pembersihan dan breakdown kolom...")
     column_mappings = [

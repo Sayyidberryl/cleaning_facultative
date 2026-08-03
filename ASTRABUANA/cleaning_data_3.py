@@ -15,6 +15,7 @@ CEDANT_VALUE = "ASTRABUANA"
 ENTITIES_RE = re.compile(r"\b(PT|CV|TBK|PTE|LTD)\b", re.IGNORECASE)
 PUNCT_RE = re.compile(r"[.,]")
 MULTIPLE_SPACES_RE = re.compile(r"\s+")
+EXT_RE = re.compile(r"-EXT\(\d+\)", re.IGNORECASE)
 
 # cleaning dasar
 def _clean_text_basic(text):
@@ -34,7 +35,10 @@ def clean_insured(name):
 
 # polis
 def clean_polis(value):
-    return _clean_text_basic(value)
+    if pd.isna(value):
+        return ""
+    text_str = EXT_RE.sub("", str(value))
+    return _clean_text_basic(text_str)
 
 # slip
 def clean_slip(value):
