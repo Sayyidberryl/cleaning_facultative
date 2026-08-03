@@ -370,6 +370,18 @@ def clean_polis(val) -> list:
         return _cap_or_join(hasil)
 
     # ===============================
+    # HAPUS P1, P2, P3, P4, ...
+    # ===============================
+
+    val = re.sub(r"\bP\d+\b", "", val, flags=re.IGNORECASE)
+
+    # Rapikan tanda + yang tersisa
+    val = re.sub(r"\+\s*\+", "+", val)
+    val = re.sub(r"^\s*\+\s*|\s*\+\s*$", "", val)
+
+    val = _normalize_spaces(val)
+
+    # ===============================
     # RULE 6
     # Multi polis +
     # ===============================
@@ -465,33 +477,46 @@ def clean_slip(val) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def clean_insured(val) -> list:
+
     if pd.isna(val):
         return []
+
     val = str(val).strip()
+
     if not val:
         return []
 
+    # Breakdown sesuai separator
+    insureds = split_insured(val)
+
     cleaned = []
-    for p in re.split(r"/|,", val):
-        p = _normalize_spaces(p.strip())
-        if len(p) <= 2:
-            continue
-        if p.upper().strip() in INSURED_JUNK_WORDS:
-            continue
-        if re.match(r"^[^a-zA-Z0-9]+$", p):
+
+    for ins in insureds:
+
+        ins = _normalize_spaces(ins)
+
+        if not ins:
             continue
 
-        p_clean = _clean_insured_name(p)
-        if not p_clean or len(p_clean) <= 2:
-            continue
-        if p_clean.upper().strip() in INSURED_JUNK_WORDS:
+        if len(ins) <= 2:
             continue
 
-        cleaned.append(p_clean)
+        if ins.upper() in INSURED_JUNK_WORDS:
+            continue
 
+        # huruf kapital
+        ins = ins.upper()
+
+        if ins not in cleaned:
+            cleaned.append(ins)
+
+    # kalau tidak berhasil dibreakdown
     if not cleaned:
-        fallback = _clean_insured_name(_normalize_spaces(val))
-        return [fallback] if fallback else []
+
+        fallback = _clean_insured_name(val)
+
+        if fallback:
+            cleaned.append(fallback.upper())
 
     return _cap_or_join(cleaned)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -509,6 +534,24 @@ def get_mitra_bisnis(comp_name2, comp_name) -> str:
         return "" if pd.isna(comp_name) else str(comp_name).strip()
     return broker
 
+def clean_business_partners(val):
+
+    if pd.isna(val):
+        return ""
+
+    val = str(val).strip().upper()
+
+    # PT. -> PT
+    val = re.sub(
+        r"\bPT\.\s*",
+        "PT ",
+        val,
+        flags=re.IGNORECASE
+    )
+
+    val = _normalize_spaces(val)
+
+    return val
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROCESS DATA
@@ -583,14 +626,17 @@ def process_data(input_file: str, output_file: str) -> None:
     broker_s = df[BROKER_COL].fillna("").astype(str).str.strip()
     cedant_s = df[CEDANT_COL].fillna("").astype(str).str.strip()
     use_cedant = (broker_s == "") | (broker_s.str.upper() == "DIRECT")
-    mitra_values = np.where(use_cedant, cedant_s, broker_s).tolist()
+    mitra_values = [
+    clean_business_partners(x)
+    for x in np.where(use_cedant, cedant_s, broker_s)
+]
 
     df.rename(columns={POLIS_COL: "polis_ori", SLIP_COL: "slip_ori", INSURED_COL: "insured_ori"},
               inplace=True)
 
     # Sisipkan kolom mitra_bisnis di sebelah kanan BROKER_COL
     insert_pos = list(df.columns).index(BROKER_COL) + 1 if BROKER_COL in df.columns else len(df.columns)
-    df.insert(insert_pos, "mitra_bisnis", mitra_values)
+    df.insert(insert_pos, "BUSINESS PARTNERS", mitra_values)
 
     print("[3/5] Menjalankan proses cleaning hanya untuk baris WAHANA ...")
 

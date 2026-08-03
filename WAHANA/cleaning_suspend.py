@@ -197,8 +197,9 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     cleaned = []
     for p in parts:
         p = _normalize_insured_part(p)
+        
         if _is_valid_insured_part(p):
-            cleaned.append(p)
+            cleaned.append(p.upper())
 
     return _cap_breakdown(cleaned)
 

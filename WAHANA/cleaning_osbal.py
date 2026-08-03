@@ -230,6 +230,17 @@ def _clean_polis_core(val) -> list:
     val_upper = val.upper().strip()
 
     # ============================================================
+    # HAPUS KETERANGAN SETELAH "/"
+    # Contoh:
+    # 098.4050.201.2024.000019.00/CN/FPAR/23/11/132
+    # ->
+    # 098.4050.201.2024.000019.00
+    # ============================================================
+
+    if "/" in val:
+        val = val.split("/", 1)[0].strip()
+
+    # ============================================================
     # VARIOUS / TBA
     # ============================================================
 
@@ -431,6 +442,27 @@ def _clean_polis_core(val) -> list:
         ]
 
         # ============================================================
+        # POLA TIDAK BERATURAN
+        # Contoh:
+        # 01540502012021000442-51481443442445452453457595861
+        # 01540502012023000758759-000165000164
+        #
+        # Dibiarkan apa adanya.
+        # ============================================================
+
+        if len(suffixes) == 1:
+
+            second = suffixes[0]
+
+            # Jika suffix bukan pola penggantian digit
+            # (terlalu panjang atau panjangnya tidak masuk akal)
+            if (
+                len(second) > 6
+                and len(second) < len(base)
+            ):
+                return [_normalize_spaces(val)]
+
+        # ============================================================
         # Jika hanya ada SATU dash dan panjang suffix > 6 digit,
         # anggap dua nomor polis berbeda.
         #
@@ -440,6 +472,47 @@ def _clean_polis_core(val) -> list:
         # 09810502012022000192
         # 09810502022022000141
         # ============================================================
+
+        # ============================================================
+        # POLA TIDAK BERATURAN
+        #
+        # Contoh:
+        # 01540502012021000442-51481443442445452453457595861
+        # 01540502012023000758759-000165000164
+        #
+        # Biarkan apa adanya.
+        # ============================================================
+
+        if len(suffixes) == 1:
+
+            # ============================================================
+            # POLA TIDAK BERATURAN
+            #
+            # Contoh:
+            # 01540502012021000442-51481443442445452453457595861
+            # 01540502012023000758759-000165000164
+            #
+            # Biarkan apa adanya.
+            # ============================================================
+
+            if (
+                len(second) > 6
+                and len(second) < len(base)
+                and not (
+                    len(second) == len(base)
+                    or second.startswith(base[:8])
+                )
+            ):
+                return [_normalize_spaces(val)]
+
+            second = suffixes[0]
+
+            # suffix terlalu panjang tetapi bukan nomor polis penuh
+            if (
+                len(second) > 6
+                and len(second) < len(base)
+            ):
+                return [_normalize_spaces(val)]
 
         if len(suffixes) == 1 and len(suffixes[0]) > 6:
             return _cap_or_join([
@@ -616,6 +689,41 @@ def _clean_polis_core(val) -> list:
             if tokens:
                 results.append(_normalize_spaces(tokens[0]))
 
+            # --------------------------------------------------------
+            # POLA PENGULANGAN
+            #
+            # Contoh:
+            # 004.1050.101.2023.000256.00  000262.00  000276.00
+            # --------------------------------------------------------
+
+            if len(blocks) > 1:
+
+                first = blocks[0].strip()
+
+                m = re.fullmatch(r"(.+?)(\d{6})\.00", first)
+
+                if m:
+
+                    prefix = m.group(1)
+                    results = [first]
+
+                    ok = True
+
+                    for b in blocks[1:]:
+
+                        b = b.strip()
+
+                        if re.fullmatch(r"\d{6}\.00", b):
+
+                            results.append(prefix + b)
+
+                        else:
+                            ok = False
+                            break
+
+                    if ok:
+                        return _cap_or_join(results)
+
         if results:
             return _cap_or_join(results)
 
@@ -701,27 +809,95 @@ def _clean_polis_core(val) -> list:
         # pertahankan nilai aslinya apa adanya.
         return [_normalize_spaces(val)]
 
+
+    # ============================================================
+    # HAPUS P3, P4, P5, DST
+    # ============================================================
+
+    val = re.sub(
+        r"\s*\+\s*P[3-9]\d*\b",
+        "",
+        val,
+        flags=re.IGNORECASE
+    )
+
+    val = _normalize_spaces(val)
+
+    # ============================================================
+    # POLA PENGULANGAN 3 DIGIT
+    #
+    # Contoh:
+    # 098.4050.201.2023.000009+007+013+018+001
+    #
+    # ->
+    # 098.4050.201.2023.000009.00
+    # 098.4050.201.2023.000007.00
+    # 098.4050.201.2023.000013.00
+    # 098.4050.201.2023.000018.00
+    # 098.4050.201.2023.000001.00
+    # ============================================================
+
+    m = re.fullmatch(
+        r"(.+?\.)(\d{6})((?:\+\d{3})+)",
+        val.replace(" ", "")
+    )
+
+    if m:
+
+        prefix = m.group(1)
+        first = m.group(2)
+
+        suffixes = [
+            s
+            for s in m.group(3).split("+")
+            if s
+        ]
+
+        results = [
+            prefix + first + ".00"
+        ]
+
+        for s in suffixes:
+            results.append(
+                prefix + first[:-3] + s + ".00"
+            )
+
+        return _cap_or_join(results)
+
     # ============================================================
     # POLA "+"
     #
-    # Contoh:
-    # 033.4050.201.2021.000585 + 000028
-    #
-    # ->
-    # 033.4050.201.2021.000585
-    # 000028
+    # Biarkan apa adanya.
     # ============================================================
 
+    # ============================================================
+    # HAPUS SEMUA TOKEN YANG MENGANDUNG HURUF
+    # Contoh:
+    # P1, P2, P3
+    # S/D
+    # VAR
+    # TBA
+    # END
+    # CANCEL
+    # REALISASI
+    # Dll.
+    # ============================================================
+
+    val = re.sub(
+        r"\b[^\s+]*[A-Za-z][^\s+]*\b",
+        "",
+        val
+    )
+
+    # Rapikan spasi dan tanda +
+    val = re.sub(r"\s*\+\s*", " + ", val)
+    val = re.sub(r"^\s*\+\s*|\s*\+\s*$", "", val)
+    val = re.sub(r"(?:\+\s*){2,}", "+ ", val)
+
+    val = _normalize_spaces(val)
+
     if "+" in val:
-
-        parts = [
-            p.strip()
-            for p in re.split(r"\s*\+\s*", val)
-            if p.strip()
-        ]
-
-        if len(parts) > 1:
-            return _cap_or_join(parts)
+        return [_normalize_spaces(val)]
 
     # ============================================================
     # CLEANUP BIASA
@@ -871,6 +1047,7 @@ def _clean_slip_core(val) -> list:
             for p in parts
             if not re.fullmatch(r"P\d+", p, flags=re.IGNORECASE)
         ]
+        
 
         if len(parts) > 1:
 
@@ -910,10 +1087,13 @@ def _clean_slip_core(val) -> list:
                     results = [first]
 
                     for s in rest:
+
+                        # ubah panjang suffix menjadi sama dengan nomor pertama
+                        s = s.zfill(suffix_len)
+
                         results.append(prefix + s)
 
                     return _cap_or_join(results)
-
             # ----------------------------------------------------
             # Semua bagian sudah berupa nomor slip lengkap
             # ----------------------------------------------------
