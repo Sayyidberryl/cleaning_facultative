@@ -116,6 +116,7 @@ def refine_with_known_pattern(value: str, patterns) -> str:
         value.strip(" .-/"),                              # buang simbol liar di ujung
         re.sub(r"\.0+$", "", value),                      # sisa ".0" dari konversi angka Excel
         "0" + value if value.isdigit() else value,        # kembalikan angka 0 di depan yang hilang
+        re.sub(r"^(\d+)(\s*/\s*(?:19|20)\d{2})$", r"0\1\2", value),  # "angka / tahun" kehilangan 0 di depan
     ]
     for c in candidates:
         if _matches_known_pattern(c, patterns):
@@ -197,6 +198,66 @@ def _is_valid_insured_part(p: str) -> bool:
         return False
     return up not in _INSURED_JUNK_WORDS
 
+_REGION_PREFIX_WORDS = {"KALTIM", "KALSEL", "KALTENG", "KALBAR", "KALUT",
+                         "SULSEL", "SULUT", "SULTENG", "SULBAR", "SULTRA",
+                         "JATIM", "JATENG", "JABAR", "SUMUT", "SUMSEL",
+                         "SUMBAR", "NTB", "NTT", "DKI"}
+
+
+def _merge_region_prefix_parts(parts: list) -> list:
+    merged = []
+    skip_next_prefix = False
+    for i, p in enumerate(parts):
+        p_stripped = p.strip()
+        if p_stripped.upper() in _REGION_PREFIX_WORDS and i + 1 < len(parts):
+            merged.append(p_stripped + " " + parts[i + 1].strip())
+            skip_next_prefix = True
+        elif skip_next_prefix:
+            skip_next_prefix = False
+            continue
+        else:
+            merged.append(p_stripped)
+    return merged
+
+def _merge_digit_start_parts(parts: list) -> list:
+    """Segmen yang diawali angka (mis. "7 SUPPLY VESSEL") itu nama
+    unit/armada, bukan perusahaan baru -> digabung ke segmen sebelumnya."""
+    merged = []
+    for p in parts:
+        p_stripped = p.strip()
+        if merged and re.match(r"^\d", p_stripped):
+            merged[-1] = merged[-1] + " " + p_stripped
+        else:
+            merged.append(p_stripped)
+    return merged
+
+
+def _name_initials_variants(name: str) -> set:
+    words = [w for w in re.split(r"[\s\-]+", name.upper()) if w]
+    if not words:
+        return set()
+    variants = {"".join(w[0] for w in words if w[0].isalpha())}
+    if len(words) >= 2:
+        variants.add("".join(w[0] for w in words[:-1] if w[0].isalpha()) + words[-1])
+    return variants
+
+
+def _is_abbreviation_of(short: str, long_name: str) -> bool:
+    short_clean = re.sub(r"[^A-Z0-9]", "", short.upper())
+    if len(short_clean) < 2 or len(short_clean) > 8:
+        return False
+    return short_clean in _name_initials_variants(long_name)
+
+
+def _strip_trailing_abbrev_word(name: str, priors: list) -> str:
+    """Kalau kata TERAKHIR di segmen gabungan ternyata singkatan dari segmen
+    sebelumnya (mis. "PDBI DSLNG" -> "DSLNG" singkatan "DONGGI-SENORO LNG"),
+    buang kata itu saja, sisanya tetap."""
+    words = name.split()
+    if len(words) >= 2 and any(_is_abbreviation_of(words[-1], p) for p in priors):
+        return " ".join(words[:-1])
+    return name
+
 
 def clean_insured(val, polis_ori, slip_ori) -> list:
     """Pecah nama insured menjadi list bagian-bagian bersih (breakdown)."""
@@ -215,18 +276,33 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     for pattern in [r"\bTBK\.?\b", r"\(PERSERO\)", r"\bPERSERO\b", r"\bLTD\.?\b"]:
         val = re.sub(pattern, "", val, flags=re.IGNORECASE)
 
-    split_pattern = r"\bQQ\b|/|,|-(?!\s*(?:19|20)\d{2}\b)|\d+\.|\bPT\.?\b|\bCV\.?\b|:|;"
+    # "-" TIDAK dijadikan pemisah lagi -- sebelumnya ini bug: nama perusahaan
+    # yang memang pakai strip (mis. "PERTA-SAMTAN GAS", "TRANS-PACIFIC
+    # PETROCHEMICAL INDOTAMA") ikut kepecah jadi 2. Strip dibiarkan menempel
+    # jadi bagian nama.
+    split_pattern = r"\bQQ\b|/|,|\d+\.|\bPT\.?\b|\bCV\.?\b|:|;"
     parts = re.split(split_pattern, val, flags=re.IGNORECASE)
+    parts = _merge_digit_start_parts(parts)  # nama unit/armada digabung, bukan dipisah
+    parts = _merge_region_prefix_parts(parts)
 
     cleaned = []
     for p in parts:
         p = _normalize_insured_part(p)
         if _is_valid_insured_part(p):
-            cleaned.append(p)
+            cleaned.append(p.replace(".", "").upper())  # titik dihapus, CAPS LOCK
 
     if not cleaned:
-        fallback = _normalize_insured_part(val)
+        fallback = _normalize_insured_part(val).replace(".", "").upper()
         return [fallback] if fallback else []
+
+    # buang segmen yang cuma singkatan dari segmen sebelumnya
+    final = []
+    for name in cleaned:
+        name = _strip_trailing_abbrev_word(name, final)
+        if any(_is_abbreviation_of(name, prior) for prior in final):
+            continue
+        final.append(name)
+    cleaned = final
 
     if len(cleaned) > MAX_SPLIT_COLS:
         return [", ".join(cleaned)]

@@ -173,6 +173,68 @@ def _handle_insured_paren(match: "re.Match") -> str:
     kept = content_.split(",")[0].strip()
     return " " + kept + " " if kept else ""
 
+_REGION_PREFIX_WORDS = {"KALTIM", "KALSEL", "KALTENG", "KALBAR", "KALUT",
+                         "SULSEL", "SULUT", "SULTENG", "SULBAR", "SULTRA",
+                         "JATIM", "JATENG", "JABAR", "SUMUT", "SUMSEL",
+                         "SUMBAR", "NTB", "NTT", "DKI"}
+
+def _merge_region_prefix_parts(parts: list) -> list:
+    merged = []
+    skip_next_prefix = False
+    for i, p in enumerate(parts):
+        p_stripped = p.strip()
+        if p_stripped.upper() in _REGION_PREFIX_WORDS and i + 1 < len(parts):
+            merged.append(p_stripped + " " + parts[i + 1].strip())
+            skip_next_prefix = True
+        elif skip_next_prefix:
+            skip_next_prefix = False
+            continue
+        else:
+            merged.append(p_stripped)
+    return merged
+
+def _merge_digit_start_parts(parts: list) -> list:
+    """Segmen yang diawali angka (mis. "7 SUPPLY VESSEL", "44 VESSEL") itu
+    nama unit/armada, bukan perusahaan baru -> digabung ke segmen
+    sebelumnya, bukan dianggap entitas terpisah."""
+    merged = []
+    for p in parts:
+        p_stripped = p.strip()
+        if merged and re.match(r"^\d", p_stripped):
+            merged[-1] = merged[-1] + " " + p_stripped
+        else:
+            merged.append(p_stripped)
+    return merged
+
+
+def _name_initials_variants(name: str) -> set:
+    words = [w for w in re.split(r"[\s\-]+", name.upper()) if w]
+    if not words:
+        return set()
+    variants = {"".join(w[0] for w in words if w[0].isalpha())}
+    if len(words) >= 2:
+        variants.add("".join(w[0] for w in words[:-1] if w[0].isalpha()) + words[-1])
+    return variants
+
+
+def _is_abbreviation_of(short: str, long_name: str) -> bool:
+    """Cek apakah `short` adalah singkatan dari `long_name`, mis. "TPPI"
+    dari "TRANS PACIFIC PETROCHEMICAL INDOTAMA"."""
+    short_clean = re.sub(r"[^A-Z0-9]", "", short.upper())
+    if len(short_clean) < 2 or len(short_clean) > 8:
+        return False
+    return short_clean in _name_initials_variants(long_name)
+
+
+def _strip_trailing_abbrev_word(name: str, priors: list) -> str:
+    """Kalau kata TERAKHIR di segmen gabungan ternyata singkatan dari segmen
+    sebelumnya (mis. "PDBI DSLNG" -> "DSLNG" singkatan "DONGGI-SENORO LNG"),
+    buang kata itu saja, sisanya tetap."""
+    words = name.split()
+    if len(words) >= 2 and any(_is_abbreviation_of(words[-1], p) for p in priors):
+        return " ".join(words[:-1])
+    return name
+
 
 def _clean_insured_name(name: str) -> str:
     name = _normalize_spaces(name)
@@ -181,13 +243,15 @@ def _clean_insured_name(name: str) -> str:
     name = re.sub(r"\bPTE\.?\b", "", name, flags=re.IGNORECASE)  # kata "PTE" dihapus
     name = re.sub(r"\(([^()]*)\)", _handle_insured_paren, name)  # kurung seimbang
     name = name.replace("(", " ").replace(")", " ")  # sisa kurung yang tidak seimbang
-    name = re.sub(r"[-/]", " ", name)         # garis miring & strip nyisa -> spasi
+    name = re.sub(r"/", " ", name)            # garis miring nyisa -> spasi (strip "-" DIBIARKAN, bagian nama resmi mis. "PERTA-SAMTAN")
     for _ in range(3):
         cleaned = _normalize_spaces(INSURED_SUFFIX_RE.sub("", name).strip().strip(","))
         if cleaned == name:
             break
         name = cleaned
-    name = _normalize_spaces(name).rstrip(".").strip()  # titik di akhir nama dihapus
+    name = name.replace(".", "")  # semua karakter titik dihapus
+    name = _normalize_spaces(name).strip()
+    name = name.upper()  # insured selalu CAPS LOCK
     return name
 
 
@@ -744,8 +808,12 @@ def clean_insured(val, polis_ori=None, slip_ori=None) -> list:
     val = re.sub(r",\s*(?:PT|CV)\.?\s+", " ", val, flags=re.IGNORECASE)
     val = re.sub(r",\s*KSO\.?\s*$", " KSO", val, flags=re.IGNORECASE)
 
+    raw_parts = re.split(_INSURED_SPLIT_RE, val, flags=re.IGNORECASE)
+    raw_parts = _merge_digit_start_parts(raw_parts)  # nama unit/armada digabung, bukan dipisah
+    raw_parts = _merge_region_prefix_parts(raw_parts)
+
     cleaned = []
-    for p in re.split(_INSURED_SPLIT_RE, val, flags=re.IGNORECASE):
+    for p in raw_parts:
         p = _normalize_spaces(p.strip())
         if len(p) <= 2:
             continue
@@ -764,19 +832,33 @@ def clean_insured(val, polis_ori=None, slip_ori=None) -> list:
         fallback = _clean_insured_name(_normalize_spaces(val))
         return [fallback] if fallback else []
 
-    return _cap_or_join(cleaned)
+    # buang segmen yang ternyata cuma singkatan dari segmen sebelumnya
+    # (mis. "TPPI" setelah "TRANS PACIFIC PETROCHEMICAL INDOTAMA")
+    final = []
+    for name in cleaned:
+        name = _strip_trailing_abbrev_word(name, final)
+        if any(_is_abbreviation_of(name, prior) for prior in final):
+            continue
+        final.append(name)
+
+    return _cap_or_join(final)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MITRA BISNIS
 # ─────────────────────────────────────────────────────────────────────────────
 
-def get_mitra_bisnis(comp_name2, comp_name) -> str:
-    """COMP_NAME2 kosong / 'DIRECT' -> pakai COMP_NAME (cedant). Selain itu -> broker."""
+def get_business_partner(comp_name2, comp_name) -> str:
+    """COMP_NAME2 kosong / 'DIRECT' -> pakai COMP_NAME (cedant). Selain itu ->
+    broker. Cleaning-nya beda dari INSURED: CAPS LOCK + titik dihapus saja,
+    PT/kata lain TIDAK dihapus."""
     broker = "" if pd.isna(comp_name2) else str(comp_name2).strip()
     if not broker or broker.upper() == "DIRECT":
-        return "" if pd.isna(comp_name) else str(comp_name).strip()
-    return broker
+        result = "" if pd.isna(comp_name) else str(comp_name).strip()
+    else:
+        result = broker
+    result = re.sub(r"\.", " ", result)  # titik jadi spasi dulu (biar "PT.TRINITYRE" -> "PT TRINITYRE", bukan nempel)
+    return re.sub(r"\s+", " ", result).upper().strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -816,13 +898,13 @@ def process_data(input_file: str, output_file: str) -> None:
             print(f"        Kolom tersedia: {list(df.columns)}")
             return
 
-    mitra_values = [get_mitra_bisnis(row[BROKER_COL], row[CEDANT_COL]) for _, row in df.iterrows()]
+    business_partner_values = [get_business_partner(row[BROKER_COL], row[CEDANT_COL]) for _, row in df.iterrows()]
 
     df.rename(columns={INSURED_COL: "FAC_INSURED_ORI"}, inplace=True)
     # FAC_POLICY_NO & FAC_SLIP tetap nama aslinya (gaya Wahana: kolom ori tidak di-rename)
 
     insert_pos = list(df.columns).index(BROKER_COL) + 1 if BROKER_COL in df.columns else len(df.columns)
-    df.insert(insert_pos, "MITRA_BISNIS", mitra_values)
+    df.insert(insert_pos, "BUSINESS_PARTNER", business_partner_values)
 
     print("[3/5] Menjalankan proses cleaning ...")
 
