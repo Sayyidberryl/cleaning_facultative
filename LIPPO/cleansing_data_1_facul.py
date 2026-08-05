@@ -15,13 +15,16 @@ from openpyxl import load_workbook
 # ==============================================================================
 # 0. KONFIGURASI
 # ==============================================================================
-INPUT_FILE = "Lippo_INS_Data_1.xlsx"
+INPUT_FILE = "Data_1_Facul.xlsx"
 SHEET_NAME = "Sheet0"
 HEADER_ROW = 0
-OUTPUT_FILE = "[2Juli2026] lippo_output_facul.xlsx"
+OUTPUT_FILE = "[3Agustus2026] lippo_output_facul.xlsx"
 CEDANT_FILTER = "LIPPO"
 
+# Nama kolom kunci untuk Data 1 (Facultative)
 CEDANT_COLUMN = "COMP_NAME"
+BROKER_NAME_COLUMN = "COMP_NAME2"
+DIRECT_MARKER = "DIRECT"
 INSURED_COLUMN = "FAC_INSURED"
 POLIS_COLUMN = "FAC_POLICY_NO"
 SLIP_COLUMN = "FAC_SLIP"
@@ -35,13 +38,8 @@ TEXT_FORMAT_COLUMN_KEYWORDS = (
 # ==============================================================================
 # 1. CLEANSING INSURED
 # ==============================================================================
-_TRANSACTION_HEADER_RE = re.compile(
-    r"^\s*(?:Pembayaran|Penagihan)?\s*(?:dan\s+Penagihan)?\s*Premi\s*"
-    r"(?:Fakultatif|SOA|Pensesian)?\s*(?:PAR\s*&?\s*EQ|BIT|GIT|CECR|QS)?\s*", flags=re.IGNORECASE)
-_TRUNCATE_TRIGGER_RE = re.compile(
-    r"\bsubsidiar|\b(?:and\s*/\s*or|and|its|their|all)\s+associat(?!ion)|&\s*/\s*or\s+associat(?!ion)|\baffiliat|\bfiliated\b|related\s+compan|"
-    r"respective\s+right|\bincluding\s+an[yd]|\bindu?ding\s+any|as\s+the\s+owner|"
-    r"as\s+owners?\b|as\s+main\s+contractor|\(as\s+mortgagee\s+and\s+loss\s+payee\)", flags=re.IGNORECASE)
+_TRANSACTION_HEADER_RE = re.compile(r"^\s*(?:Pembayaran|Penagihan)?\s*(?:dan\s+Penagihan)?\s*Premi\s*(?:Fakultatif|SOA|Pensesian)?\s*(?:PAR\s*&?\s*EQ|BIT|GIT|CECR|QS)?\s*", flags=re.IGNORECASE)
+_TRUNCATE_TRIGGER_RE = re.compile(r"\bsubsidiar|\b(?:and\s*/\s*or|and|its|their|all)\s+associat(?!ion)|&\s*/\s*or\s+associat(?!ion)|\baffiliat|\bfiliated\b|related\s+compan|respective\s+right|\bincluding\s+an[yd]|\bindu?ding\s+any|as\s+the\s+owner|as\s+owners?\b|as\s+main\s+contractor|\(as\s+mortgagee\s+and\s+loss\s+payee\)", flags=re.IGNORECASE)
 
 def _truncate_from_first_trigger(text: str) -> str:
     match = _TRUNCATE_TRIGGER_RE.search(text)
@@ -49,23 +47,17 @@ def _truncate_from_first_trigger(text: str) -> str:
 
 _REMOVE_ONLY_RE = re.compile(r"\bas\s+principal\b|\bsebagai\s+principal\b|\bsebagai\s+kontraktor\b", flags=re.IGNORECASE)
 _GENERIC_BOILERPLATE_TAIL_RE = re.compile(r"\bsub\s*-?\s*kontraktor\b.*$|\banak\s+perusahaan\b.*$|\bafiliasi\s+perusahaan\b.*$|\bdan\s+semua\b\s*[–-]?\s*$", flags=re.IGNORECASE)
-_TITLE_RE = re.compile(
-    r"\b(?:S\.?H\.?|S\.?I\.?Kom\.?|S\.?E\.?|S\.?T\.?|S\.?Kom\.?|S\.?Psi\.?|"
-    r"M\.?H\.?|M\.?M\.?|M\.?Sc\.?|Ir\.|Drs\.|Dra\.|Prof\.|Dr\.|"
-    r"Tn\.?|Bpk\.?|Bapak|Ibu|Ny\.?|Nyonya|Mr\.?|Mrs\.?|Ms\.?)\b", flags=re.IGNORECASE)
+_TITLE_RE = re.compile(r"\b(?:S\.?H\.?|S\.?I\.?Kom\.?|S\.?E\.?|S\.?T\.?|S\.?Kom\.?|S\.?Psi\.?|M\.?H\.?|M\.?M\.?|M\.?Sc\.?|Ir\.|Drs\.|Dra\.|Prof\.|Dr\.|Tn\.?|Bpk\.?|Bapak|Ibu|Ny\.?|Nyonya|Mr\.?|Mrs\.?|Ms\.?)\b", flags=re.IGNORECASE)
 _LEGAL_ENTITY_RE = re.compile(r"\b(?:PT\.?|P\.T\.?|CV\.?|C\.V\.?|TBK\.?|Tbk\.?|PP\.?|PERSERO|Perseroan\s+Terbatas|LTD\.?)\b", flags=re.IGNORECASE)
 
 # --- PATCH: koma DIHAPUS dari splitter (dulu ada ",", ";", "/" jadi splitter).
 # Alasan: koma di data ini hampir selalu dipakai sbg pemisah "NAMA,PT" atau
-# rincian nama panjang (mis. nama dinas pemerintahan), BUKAN pemisah 2 entitas
-# insured yang berbeda. Pemisah entitas beneran yang dipakai secara konsisten
-# di data adalah "/", "QQ", dan "AND/OR". Semicolon dipertahankan.
+# rincian nama panjang, BUKAN pemisah 2 entitas.
 _ENTITY_SPLIT_RE = re.compile(r"\b(?:QQ|Q\.Q\.)\b|\band\s*/\s*or\b|\bdan\s*/\s*atau\b|\bin\s+this\s+case\b|\bdalam\s+hal\s+ini\b|;|/", flags=re.IGNORECASE)
-
 _INSURED_VARIOUS_RE = re.compile(r"\bVARIOUS\b", flags=re.IGNORECASE)
 
-# --- PATCH: noise "<BULAN> BATCH <angka>" atau "BATCH <angka>" dibuang total
-# dari nama insured. Nama bulan HANYA dibuang kalau menempel langsung dengan kata BATCH.
+# --- PATCH: noise "<BULAN> BATCH <angka>" atau "BATCH <angka>" dibuang total.
+# HANYA dibuang kalau menempel langsung dengan kata BATCH.
 _INSURED_BATCH_NOISE_RE = re.compile(
     r"\b(?:JAN(?:UARI|UARY)?|FEB(?:RUARI|RUARY)?|MAR(?:ET|CH)?|APR(?:IL)?|MEI|MAY|JUN(?:I|E)?|"
     r"JUL(?:I|Y)?|AGU(?:STUS)?|AUG(?:UST)?|SEP(?:TEMBER)?|OKT(?:OBER)?|OCT(?:OBER)?|"
@@ -79,21 +71,20 @@ _INSURED_BATCH_NOISE_RE = re.compile(
 
 def _strip_insured_batch_noise(text: str) -> str: return _INSURED_BATCH_NOISE_RE.sub(" ", text)
 
-# --- PATCH: karakter simbol/mojibake yang muncul dari encoding rusak dibuang total
+# --- PATCH: karakter simbol/mojibake yang muncul dari encoding rusak dibuang total.
 _STRAY_SYMBOL_RE = re.compile(r"[¿¡‽]")
 def _strip_stray_symbols(text: str) -> str: return _STRAY_SYMBOL_RE.sub(" ", text)
 
 _PAREN_GROUP_RE = re.compile(r"\([^()]*\)")
 
-# --- PATCH: isi tanda kurung sekarang di-protect PENUH (bukan cuma delimiter split)
-# supaya PT/CV/TBK/PERSERO/dsb di dalam kurung TIDAK ikut ke-strip oleh _strip_legal_entity.
+# --- PATCH: isi tanda kurung sekarang di-protect PENUH supaya PT/CV/TBK dll
+# di dalam kurung TIDAK ikut ke-strip oleh _strip_legal_entity.
 _PAREN_STASH: dict[str, str] = {}
 _PAREN_TOKEN_RE = re.compile(r"\uE100(\d+)\uE101")
 
 def _protect_parens_content(text: str) -> str:
     def _mask(match: "re.Match") -> str:
-        idx = len(_PAREN_STASH)
-        token = f"\uE100{idx}\uE101"
+        idx, token = len(_PAREN_STASH), f"\uE100{len(_PAREN_STASH)}\uE101"
         _PAREN_STASH[token] = match.group(0)
         return token
     return _PAREN_GROUP_RE.sub(_mask, text)
@@ -103,13 +94,10 @@ def _restore_protected_chars(text: str) -> str:
 
 def _restore_protected_parens(text: str) -> str:
     def _unmask(match: "re.Match") -> str:
-        token = f"\uE100{match.group(1)}\uE101"
-        return _PAREN_STASH.get(token, match.group(0))
+        return _PAREN_STASH.get(f"\uE100{match.group(1)}\uE101", match.group(0))
     return _PAREN_TOKEN_RE.sub(_unmask, text)
 
-_INSURED_MERGE_OVERRIDES = {
-    "APARTEMEN EKSEKUTIF MENTENG,PERHIM.PENGH": ["APARTEMEN EKSEKUTIF MENTENG PERHIM PENGH"],
-}
+_INSURED_MERGE_OVERRIDES = {"APARTEMEN EKSEKUTIF MENTENG,PERHIM.PENGH": ["APARTEMEN EKSEKUTIF MENTENG PERHIM PENGH"]}
 _LEGAL_ENTITY_DASH_SIGNAL_RE = re.compile(r",\s*(?:PT\.?|P\.T\.?|CV\.?|C\.V\.?|TBK\.?|Tbk\.?|PERSERO)\s*[\r\n]*\s*-\s*", flags=re.IGNORECASE)
 _GENERIC_DASH_SEPARATOR_RE = re.compile(r"\s*[\r\n]+\s*-\s*|\s+-\s+")
 
@@ -127,8 +115,7 @@ def _truncate_boilerplate_tail(text: str) -> str:
     if match_generic: text = text[: match_generic.start()]
     return _REMOVE_ONLY_RE.sub(" ", text)
 
-# --- PATCH: kurung TIDAK lagi ikut ke-strip di final polish. Isi kurung
-# (PRINCIPAL, PERSERO, WTC SERPONG, dst) dipertahankan apa adanya sbg bagian nama.
+# --- PATCH: kurung TIDAK lagi ikut ke-strip di final polish.
 def _final_polish(text: str) -> str:
     t = re.sub(r"[,;:\"'.]", " ", text)
     t = re.sub(r"[-/]", " ", t)
@@ -141,22 +128,13 @@ def _final_polish(text: str) -> str:
     )
     previous = None
     while previous != t:
-        previous = t
-        t = re.sub(dangling_pattern, "", t, flags=re.IGNORECASE).strip()
+        previous, t = t, re.sub(dangling_pattern, "", t, flags=re.IGNORECASE).strip()
     return t.upper()
 
 _LIPPO_KNOWN_ENTITIES = ["MATAHARI PUTRA PRIMA", "MATAHARI BOSTON DRIGSTORE", "MATAHARI PUSAKA TAMA", "MPP LIPPO GROUP", "LIPPO GROUP"]
 _LIPPO_KNOWN_ENTITIES_SORTED = sorted(_LIPPO_KNOWN_ENTITIES, key=len, reverse=True)
 _KNOWN_ENTITY_RE = re.compile("|".join(re.escape(name) for name in _LIPPO_KNOWN_ENTITIES_SORTED))
-
-def _build_entity_word_pattern(name: str) -> str:
-    joiner = r"(?:\s*/\s*|\s+)"
-    return joiner.join(re.escape(w) for w in name.split())
-
-_ENTITY_SLASH_NORMALIZE_PATTERNS = [
-    (name, re.compile(r"\b" + _build_entity_word_pattern(name) + r"\b", flags=re.IGNORECASE))
-    for name in _LIPPO_KNOWN_ENTITIES_SORTED if len(name.split()) > 1
-]
+_ENTITY_SLASH_NORMALIZE_PATTERNS = [(name, re.compile(r"\b" + r"(?:\s*/\s*|\s+)".join(re.escape(w) for w in name.split()) + r"\b", flags=re.IGNORECASE)) for name in _LIPPO_KNOWN_ENTITIES_SORTED if len(name.split()) > 1]
 
 def _normalize_entity_slash_variants(text: str) -> str:
     for canonical, pattern in _ENTITY_SLASH_NORMALIZE_PATTERNS: text = pattern.sub(canonical, text)
@@ -194,9 +172,7 @@ def clean_insured_name(text: str) -> list:
     t = _truncate_boilerplate_tail(t)
     t = _protect_parens_content(t)
 
-    raw_parts = _ENTITY_SPLIT_RE.split(t)
-    results = []
-    
+    raw_parts, results = _ENTITY_SPLIT_RE.split(t), []
     for part in raw_parts:
         part = _restore_protected_chars(part)
         cleaned = _truncate_boilerplate_tail(part)
@@ -212,14 +188,12 @@ def clean_insured_name(text: str) -> list:
             for name in known_split:
                 if name not in results: results.append(name)
             continue
-
         if cleaned not in results: results.append(cleaned)
 
-    if len(results) > MAX_BREAKDOWN_CODES: return [original]
-    return results
+    return [original] if len(results) > MAX_BREAKDOWN_CODES else results
 
 # ==============================================================================
-# 2. CLEANSING POLIS & SLIP NO  (KHUSUS POLA DATA 1 - FACULTATIVE) -- UNCHANGED
+# 2. CLEANSING POLIS & SLIP NO  (KHUSUS POLA DATA 1 - FACULTATIVE)
 # ==============================================================================
 _MAIN_LEN_MIN, _MAIN_LEN_MAX = 11, 16
 _MAIN_DIGITS_PATTERN = rf"\d{{{_MAIN_LEN_MIN},{_MAIN_LEN_MAX}}}"
@@ -245,13 +219,9 @@ _MONTH_YEAR_NOISE_RE = re.compile(
 _CURRENCY_NOISE_RE = re.compile(r"\b(?:USD|IDR|SGD|EUR)\b", flags=re.IGNORECASE)
 
 _ADMIN_LABEL_NOISE_RE = re.compile(
-    r"\bDEKL\.?\b"
-    r"|\b\d+\s*SLIP\s+DIJADIKAN\s+\d+\b"
-    r"|\bID\s*NO\.?\s*[A-Z0-9]*\b"
-    r"|(?:\b\d{1,6}\s*/?\s*)?\bSHIPMENT\s*\d*\b"
-    r"|(?:\b\d{1,6}\s*/?\s*)?\bBORDERO\b"
-    r"|(?:\b\d{1,6}\s*/?\s*)?\bPENDING\s+SLIP\b"
-    r"|(?:\b\d{1,6}\s*/?\s*)?\bBATCH\s*\d*\b", flags=re.IGNORECASE)
+    r"\bDEKL\.?\b|\b\d+\s*SLIP\s+DIJADIKAN\s+\d+\b|\bID\s*NO\.?\s*[A-Z0-9]*\b"
+    r"|(?:\b\d{1,6}\s*/?\s*)?\bSHIPMENT\s*\d*\b|(?:\b\d{1,6}\s*/?\s*)?\bBORDERO\b"
+    r"|(?:\b\d{1,6}\s*/?\s*)?\bPENDING\s+SLIP\b|(?:\b\d{1,6}\s*/?\s*)?\bBATCH\s*\d*\b", flags=re.IGNORECASE)
 
 _PAREN_GROUP_NOISE_RE = re.compile(r"\([^()]*\)")
 _DOC_REF_DATE_NOISE_RE = re.compile(r"(?:\b\d{1,6}\s*/\s*)?\b(?:CN|DN)\s*/\s*\d{1,2}\s*/\s*\d{1,2}\s*/\s*\d{2,4}(?:\s*/\s*\d{1,6}\b)?", flags=re.IGNORECASE)
@@ -274,12 +244,21 @@ def _strip_known_noise_phrases(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 _MAIN_SPACE_SUFFIX_RE = re.compile(rf"^({_MAIN_DIGITS_PATTERN})\s+(\d{{1,6}})\s*(?:/\s*VAR[A-Z]*\s*)?$", flags=re.IGNORECASE)
-
 _POLIS_SLIP_OVERRIDES = {
     "APRIL 2026 - 0015/LI-RBU/V/2026 / 1112302600206,1112302600215,1112302600218,1112302600221.": [
         "1112302600206", "1112302600215", "1112302600218", "1112302600221",
     ],
 }
+
+# --- PATCH: pola "TBA/NAMA" atau "TBA / NAMA" -- TBA dibuang bersama separatornya,
+# sisanya dipakai sbg hasil. Scope SANGAT ketat supaya TIDAK menyentuh TBA yang 
+# menempel di kode angka/referensi kompleks. Suffix "PT" di ujung nama juga ikut dibuang.
+_TBA_NAME_ONLY_RE = re.compile(r"^TBA\s*/\s*([A-Za-z][A-Za-z ,.]*[A-Za-z.])$", flags=re.IGNORECASE)
+_TBA_RESULT_PT_SUFFIX_RE = re.compile(r"\s*,?\s*P\.?T\.?$", flags=re.IGNORECASE)
+
+def _strip_tba_prefix_if_name(text: str) -> str:
+    match = _TBA_NAME_ONLY_RE.match(text)
+    return _TBA_RESULT_PT_SUFFIX_RE.sub("", match.group(1)).strip() if match else text
 
 def _has_descriptive_narrative(text: str) -> bool:
     for word in _ALPHA_WORD_RE.findall(text):
@@ -322,14 +301,16 @@ def _split_sd_range(text: str):
         expanded = _expand_suffix_range(runs_left[-2], last_left, first_right)
     elif last_left_is_main and _TOK_MAIN_RE.match(first_right):
         expanded = _expand_numeric_range(last_left, first_right)
-    else:
-        return "__FALLBACK__"
+    else: return "__FALLBACK__"
     return expanded if expanded is not None else "__FALLBACK__"
 
 def clean_split_code(text: str) -> list:
     if not isinstance(text, str) or not text.strip() or text.strip().lower() in ("nan", "none", "-"): return []
-    
     original = text.strip()
+
+    tba_stripped = _strip_tba_prefix_if_name(original)
+    if tba_stripped != original: return [tba_stripped]
+
     space_concat_match = _MAIN_SPACE_SUFFIX_RE.match(original)
     if space_concat_match: return [space_concat_match.group(1) + space_concat_match.group(2)]
     if original in _POLIS_SLIP_OVERRIDES: return _POLIS_SLIP_OVERRIDES[original]
@@ -342,8 +323,7 @@ def clean_split_code(text: str) -> list:
     if sd_result is not None: return sd_result
     
     t = re.sub(r"[\u2012\u2013\u2014\u2015]", "-", _strip_various(t))
-    _had_slash_context = "/" in t
-    _delim_split_re = re.compile(r"(\s{2,}|[,+/;&])")
+    _had_slash_context, _delim_split_re = "/" in t, re.compile(r"(\s{2,}|[,+/;&])")
     
     raw_split = [chunk for chunk in _delim_split_re.split(t) if chunk != ""]
     strong_segments, pending_delim = [], None
@@ -370,8 +350,7 @@ def clean_split_code(text: str) -> list:
             if _TOK_MAIN_RE.match(p) or _TOK_PLACEHOLDER_RE.match(p):
                 raw_tokens.append(("-".join(buffer), buffer_delim))
                 buffer, buffer_delim = [p], "-"
-            else:
-                buffer.append(p)
+            else: buffer.append(p)
         raw_tokens.append(("-".join(buffer), buffer_delim))
         
     tokens = [(tok, d) for tok, d in raw_tokens if not _TOK_PLACEHOLDER_RE.match(tok)]
@@ -460,11 +439,22 @@ def build_output(df_filtered: pd.DataFrame) -> pd.DataFrame:
     insured_cln_all, polis_cln_all, slip_cln_all, max_ins, max_pol, max_slp = _breakdown_all_rows(df_filtered, col_insured, col_polis, col_slip)
     original_cols = list(df_filtered.columns)
     df_filtered = df_filtered.reset_index(drop=True)
-    
-    # Dict di Python mempertahankan urutan insert, jadi kolom CLN ditaruh tepat setelah kolom original
+
+    # --- BUSINESS_PARTNER: DIRECT -> nama cedant (COMP_NAME), selain itu -> nama broker apa adanya
+    if BROKER_NAME_COLUMN in df_filtered.columns and CEDANT_COLUMN in df_filtered.columns:
+        is_direct = df_filtered[BROKER_NAME_COLUMN].astype(str).str.strip().str.upper() == DIRECT_MARKER
+        bp_series = df_filtered[CEDANT_COLUMN].where(is_direct, df_filtered[BROKER_NAME_COLUMN])
+        # Hapus titik HANYA pada prefix "PT." -> "PT" 
+        business_partner_values = bp_series.astype(str).str.replace(r"^(\s*PT)\.\s*", r"\1 ", regex=True, flags=re.IGNORECASE).values
+    else:
+        business_partner_values = None
+
     output_cols_data = {}
     for col in original_cols:
         output_cols_data[col] = df_filtered[col].values
+        if col == BROKER_NAME_COLUMN and business_partner_values is not None:
+            output_cols_data["BUSINESS_PARTNER"] = business_partner_values
+            
         if col == col_insured:
             for i in range(1, max_ins + 1): output_cols_data[f"INSURED_CLN_{i}"] = [lst[i - 1] if i <= len(lst) else "" for lst in insured_cln_all]
         if col == col_polis:
@@ -483,7 +473,7 @@ def save_with_text_format(df: pd.DataFrame, output_path: str) -> None:
     df.to_excel(output_path, index=False)
     workbook = load_workbook(output_path)
     worksheet = workbook.active
-    text_col_indices = [idx for idx, col in enumerate(df.columns, start=1) if any(keyword in str(col).upper() for keyword in TEXT_FORMAT_COLUMN_KEYWORDS)]
+    text_col_indices = [idx for idx, col in enumerate(df.columns, start=1) if any(kw in str(col).upper() for kw in TEXT_FORMAT_COLUMN_KEYWORDS)]
     
     for col_idx in text_col_indices:
         for row in range(2, worksheet.max_row + 1):

@@ -16,10 +16,10 @@ from openpyxl import load_workbook
 # ==============================================================================
 # 0. KONFIGURASI
 # ==============================================================================
-INPUT_FILE = "Lippo_INS_Data_3.xlsx"
+INPUT_FILE = "Data_3_Suspend.xlsx"
 SHEET_NAME = "Detail Database"
 HEADER_ROW = 2  # header di baris excel ke-3
-OUTPUT_FILE = "[2Juli2026] lippo_output_suspense.xlsx"
+OUTPUT_FILE = "[3Agustus2026] lippo_output_suspend.xlsx"
 CEDANT_FILTER = "LIPPO"
 
 MAX_BREAKDOWN_CODES = 5  # >5 pecahan polis/slip -> simpan kode pertama saja
@@ -40,9 +40,24 @@ _ENTITY_SPLIT_RE = re.compile(r"\b(?:QQ|Q\.Q\.)\b|\band\s*/\s*or\b|\bdan\s*/\s*a
 _LEGAL_ENTITY_DASH_SIGNAL_RE = re.compile(r",\s*(?:PT\.?|P\.T\.?|CV\.?|C\.V\.?|TBK\.?|Tbk\.?|PERSERO)\s*[\r\n]*\s*-\s*", RE_I)
 _GENERIC_DASH_SEPARATOR_RE = re.compile(r"\s*[\r\n]+\s*-\s*|\s+-\s+")
 
+# Pola G: "ENTITY1 and/or associated... for their/its respective rights... ENTITY2" 
+# -> klausa boilerplate di TENGAH kalimat dibuang, bukan di-truncate ke akhir.
+_MIDDLE_BOILERPLATE_CLAUSE_RE = re.compile(
+    r"(?:\band\s*/\s*or\s+)?(?:associat\w*|subsidiar\w*|affiliat\w*|related\s+compan\w*)"
+    r"(?:\s+and\s*/\s*or\s+(?:associat\w*|subsidiar\w*|affiliat\w*|related\s+compan\w*))*"
+    r"\s+for\s+(?:their|its)\s+respective\s+rights?\s+and\s+interests?\b", RE_I)
+
 def _truncate_from_first_trigger(text: str) -> str:
     match = _TRUNCATE_TRIGGER_RE.search(text)
     return text[: match.start()] if match else text
+
+def _strip_middle_boilerplate_clause(text: str) -> str:
+    match = _MIDDLE_BOILERPLATE_CLAUSE_RE.search(text)
+    if not match: return text
+    trailing = text[match.end():].strip(" .,;:-")
+    if len(trailing) >= 3 and re.search(r"[A-Za-z]{3,}", trailing):
+        return f"{text[: match.start()].rstrip()}, {trailing}"
+    return text
 
 def _normalize_dash_entity_list(text: str) -> str:
     if _LEGAL_ENTITY_DASH_SIGNAL_RE.search(text): return _GENERIC_DASH_SEPARATOR_RE.sub(", ", text)
@@ -57,6 +72,9 @@ def _strip_transaction_header(text: str) -> str: return _TRANSACTION_HEADER_RE.s
 # D: bare AND/OR sbg separator entitas (lihat _ENTITY_SPLIT_RE)
 # E: suffix "X group of companies" (tanpa comprising of) -> suffix dibuang, tetap 1 entitas
 # F: "X (PT Y)" dgn Y nama company asli -> [X, Y]
+# G: "ENTITY1 and/or associated... for their/its respective rights... ENTITY2" (Pola G)
+# Pola B/C dicek sebelum truncate boilerplate umum karena trigger truncate
+# justru bagian dari pola itu sendiri. Pola A sebelum E supaya "comprising of" aman.
 
 _COMPRISING_OF_RE = re.compile(r"^(?P<head>.*?\bgroup)\s+of\s+companies\s+comprising\s+of\s*:\s*(?P<tail>.+)$", re.IGNORECASE | re.DOTALL)
 _CONSISTS_OF_RE = re.compile(r"consists\s+of\s*:", RE_I)
@@ -76,7 +94,6 @@ def _is_real_company_name(inner: str) -> bool:
     return not (all_short_upper and not has_lowercase)
 
 def _try_pattern_f_paren_pt(text: str):
-    """Pola F: 'X (PT Y)' dgn Y nama company asli -> [X, Y]; None kalau kurung cuma kode."""
     m = _PAREN_PT_RE.search(text)
     if not m: return None
     inner = m.group("inner").strip()
@@ -90,7 +107,6 @@ def _try_pattern_a_comprising_of(text: str):
     return [m.group("head").strip(), m.group("tail").strip()] if m else None
 
 def _try_pattern_b_consists_of(text: str):
-    """Pola B: nama depan sebelum 'Consists of' diabaikan (selalu duplikat item 1)."""
     m = _CONSISTS_OF_RE.search(text)
     if not m: return None
     tail = _truncate_from_first_trigger(text[m.end():])
@@ -138,8 +154,8 @@ def _finalize_segments(raw_parts: list) -> list:
     return results
 
 def _clean_insured_name_breakdown(text: str) -> list:
-    t = _normalize_dash_entity_list(_strip_titles(_strip_transaction_header(text.strip())))
-    
+    t = _strip_middle_boilerplate_clause(_normalize_dash_entity_list(_strip_titles(_strip_transaction_header(text.strip()))))
+
     # Pola C/B duluan
     special_segments = _try_pattern_c_as_per_list(t) or _try_pattern_b_consists_of(t)
     if special_segments is not None: return _finalize_segments(special_segments)
@@ -232,7 +248,7 @@ def _detect_key_columns(df: pd.DataFrame) -> tuple[str, str, str]:
     col_slip = next((c for c in df.columns if "SLIP" in str(c).upper()), None)
 
     if None in (col_insured, col_polis, col_slip):
-        raise ValueError(f"Kolom kunci tidak lengkap ditemukan. INSURED={col_insured}, POLIS={col_polis}, SLIP={col_slip}")
+        raise ValueError(f"Kolom kunci tidak lengkap. INSURED={col_insured}, POLIS={col_polis}, SLIP={col_slip}")
     print(f"[INFO] Kolom terdeteksi -> INSURED='{col_insured}', POLIS='{col_polis}', SLIP='{col_slip}'")
     return col_insured, col_polis, col_slip
 
@@ -256,6 +272,7 @@ def _breakdown_all_rows(df: pd.DataFrame, col_insured: str, col_polis: str, col_
 def build_output(df_filtered: pd.DataFrame) -> pd.DataFrame:
     col_insured, col_polis, col_slip = _detect_key_columns(df_filtered)
     insured_cln_all, polis_cln_all, slip_cln_all, max_ins, max_pol, max_slp = _breakdown_all_rows(df_filtered, col_insured, col_polis, col_slip)
+    
     original_cols = list(df_filtered.columns)
     df_filtered = df_filtered.reset_index(drop=True)
 
