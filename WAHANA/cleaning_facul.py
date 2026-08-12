@@ -6,7 +6,7 @@ import pandas as pd
 
 
 INPUT_FILE  = os.path.join("input", "1a. Transaksi Facul 01.01.23 - 17.07.26.xlsx")
-OUTPUT_FILE = os.path.join("output", "Facul_Clean_WAHANA.xlsx")
+OUTPUT_FILE = os.path.join("output", "wahana_output_facul.xlsx")
 
 CEDANT_COL   = "COMP_NAME"
 CEDANT_VALUE = "PT.ASURANSI WAHANA TATA"
@@ -337,14 +337,10 @@ def clean_polis(val) -> list:
 
     # ===============================
     # RULE 4
-    # Jangan ubah polis yang ada huruf
-    # misal:
-    # SDM.1003624.SJK
-    # AIU-PAR-44764
-    # MOP MARINE
-    # ===============================
+    # Polis yang ada huruf → tetap pertahankan isi,
+    # tetapi hapus titik
     if re.search(r"[A-Z]", val_upper):
-        return [val]
+        return [val.replace(".", "")]
 
     # ===============================
     # RULE 5
@@ -464,6 +460,17 @@ def clean_slip(val) -> list:
         # Rule 4 : Hapus karakter di depan/belakang
         # ==========================================
         s = s.strip("-_,.; ")
+
+        # ==========================================
+        # Rule 4 : Hapus karakter di depan/belakang
+        # ==========================================
+        s = s.strip("-_,.; ")
+
+        # Hapus titik di dalam slip
+        s = s.replace(".", "")
+
+        if not s:
+            continue
 
         if not s:
             continue
