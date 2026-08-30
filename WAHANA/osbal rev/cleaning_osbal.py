@@ -4,8 +4,8 @@ import re
 import pandas as pd
 
 
-INPUT_FILE = os.path.join("input", "2a. Transaksi Osbal 01.01.23 - 17.07.26 Rev.xlsx")
-OUTPUT_FILE = os.path.join("output", "2a_Transaksi_Osbal_Clean_WAHANA.xlsx")
+INPUT_FILE = os.path.join("input", "inosbal_facul_rev1.xlsx")
+OUTPUT_FILE = os.path.join("output", "wahana_output_osbal_rev2.xlsx")
 
 CEDANT_COL   = "CCOS_COMP_NAME"
 CEDANT_VALUE = "PT.ASURANSI WAHANA TATA"
@@ -442,6 +442,81 @@ def _clean_polis_core(val) -> list:
         ]
 
         # ============================================================
+        # KHUSUS:
+        # Jika suffix pertama > 6 digit, ambil BASE saja.
+        #
+        # Contoh:
+        # 02210502012023000494-70320230003-002
+        #
+        # Hasil:
+        # 02210502012023000494
+        # ============================================================
+
+        if suffixes and len(suffixes[0]) > 6:
+            return [base]
+
+        # KHUSUS:
+        # Kalau ada suffix 6 digit, hanya suffix 6 digit yang dipakai.
+        # Suffix 4 digit seperti 0006 dan 0005 diabaikan.
+
+        suffix_6_digit = [
+            s for s in suffixes
+            if len(s) == 6
+        ]
+
+        if suffix_6_digit and len(base) > 6:
+            results = [base]
+
+            for suffix in suffix_6_digit:
+                new_polis = base[:-6] + suffix
+
+                if new_polis not in results:
+                    results.append(new_polis)
+
+            return _cap_or_join(results)
+
+        # ============================================================
+        # POLA SUFFIX CAMPURAN 4 DAN 6 DIGIT
+        #
+        # Contoh:
+        # 00940502012023001727-1726-000163-000164-001728
+        #
+        # Base   : 00940502012023001727
+        # 1726   : ganti 4 digit terakhir
+        # 000163 : ganti 6 digit terakhir
+        # 000164 : ganti 6 digit terakhir
+        # 001728 : ganti 6 digit terakhir
+        #
+        # Hasil:
+        # 00940502012023001727
+        # 00940502012023001726
+        # 00940502012023000163
+        # 00940502012023000164
+        # 00940502012023001728
+        # ============================================================
+
+        if (
+            len(suffixes) >= 2
+            and all(re.fullmatch(r"\d+", s) for s in suffixes)
+            and all(len(s) in {4, 6} for s in suffixes)
+            and len(base) > 6
+        ):
+            results = [base]
+
+            for suffix in suffixes:
+
+                suffix_len = len(suffix)
+
+                new_polis = (
+                    base[:-suffix_len] + suffix
+                )
+
+                if new_polis not in results:
+                    results.append(new_polis)
+
+            return _cap_or_join(results)
+
+        # ============================================================
         # POLA TIDAK BERATURAN
         # Contoh:
         # 01540502012021000442-51481443442445452453457595861
@@ -526,63 +601,46 @@ def _clean_polis_core(val) -> list:
 
         if suffixes:
 
-            # Semua suffix harus angka
-            if all(
-                re.fullmatch(r"\d+", s)
-                for s in suffixes
-            ):
+            # ========================================================
+            # KHUSUS WAHANA:
+            # HANYA SUFFIX 6 DIGIT YANG BOLEH DIPROSES
+            #
+            # Contoh:
+            # 02210502012023000128-000129-0006-0005
+            #
+            # 000129 -> DIPAKAI
+            # 0006   -> DIABAIKAN
+            # 0005   -> DIABAIKAN
+            #
+            # Hasil:
+            # 02210502012023000128
+            # 02210502012023000129
+            # ========================================================
 
-                suffix_lengths = {
-                    len(s)
-                    for s in suffixes
-                }
+            suffix_6_digit = [
+                s for s in suffixes
+                if len(s) == 6
+            ]
 
-                # =================================================
-                # CASE A
-                # SUFFIX PANJANGNYA SAMA
-                # =================================================
+            if suffix_6_digit and len(base) > 6:
 
-                if len(suffix_lengths) == 1:
+                results = [base]
 
-                    suffix_len = len(suffixes[0])
+                for suffix in suffix_6_digit:
+                    new_polis = base[:-6] + suffix
 
-                    # Panjang suffix yang dianggap masuk
-                    # pola pengulangan: 2 - 6 digit
-                    if 2 <= suffix_len <= 6:
+                    if new_polis not in results:
+                        results.append(new_polis)
 
-                        # Base harus lebih panjang
-                        # daripada suffix
-                        if len(base) > suffix_len:
+                return _cap_or_join(results)
 
-                            results = [base]
+            # ========================================================
+            # Kalau TIDAK ADA suffix 6 digit,
+            # jangan proses suffix 4 digit / 3 digit / 2 digit
+            # sebagai pengulangan polis.
+            # ========================================================
 
-                            for suffix in suffixes:
-
-                                new_polis = (
-                                    base[:-suffix_len]
-                                    + suffix
-                                )
-
-                                results.append(
-                                    new_polis
-                                )
-
-                            return _cap_or_join(results)
-
-                # =================================================
-                # CASE B
-                # SUFFIX BERBEDA PANJANG
-                #
-                # Contoh:
-                # 123456789-12-123-1234
-                #
-                # Jangan breakdown.
-                # =================================================
-
-                return [
-                    _normalize_spaces(val)
-                ]
-
+            return [_normalize_spaces(val)]
     # ============================================================
     # POLA SPASI GANDA
     #
@@ -809,6 +867,33 @@ def _clean_polis_core(val) -> list:
         # pertahankan nilai aslinya apa adanya.
         return [_normalize_spaces(val)]
 
+    # ============================================================
+    # POLA PLUS - DUA NOMOR POLIS LENGKAP
+    #
+    # Contoh:
+    # 022.4050.201.2023.000394 + 022.4050.202.2023.00077
+    #
+    # ->
+    # 022.4050.201.2023.000394
+    # 022.4050.202.2023.00077
+    # ============================================================
+
+    if "+" in val:
+
+        plus_parts = [
+            p.strip()
+            for p in re.split(r"\s*\+\s*", val)
+            if p.strip()
+        ]
+
+        if len(plus_parts) > 1:
+
+            # Semua bagian harus berupa nomor polis lengkap
+            if all(
+                re.fullmatch(r"\d+(?:\.\d+)+", p)
+                for p in plus_parts
+            ):
+                return _cap_or_join(plus_parts)
 
     # ============================================================
     # HAPUS P3, P4, P5, DST
@@ -1305,8 +1390,29 @@ def _insert_clean_columns(
         df[col_name] = [lst[i - 1] if i - 1 < len(lst) else None for lst in all_lists]
         added.append(col_name)
     return added
+    
+def _is_valid_clstd(val) -> bool:
+    if pd.isna(val):
+        return False
 
+    val = str(val).strip().upper()
 
+    if not val:
+        return False
+
+    # Nilai CLSDT yang memang tidak bisa dipakai
+    if val in {"TBA", "VAR", "VARIOUS"}:
+        return False
+
+    # CLSDT hanya berisi keterangan P1/P2/... CANCEL
+    # dianggap tidak jelas → fallback ke ORI
+    if re.fullmatch(
+        r"(?:P\d+\s*CANCEL\s*)+",
+        val
+    ):
+        return False
+
+    return True
 def process_data(input_file: str, output_file: str) -> None:
     print(f"[1/5] Membaca data dari: {input_file} ...")
     df = pd.read_excel(input_file, header=0)
@@ -1339,11 +1445,41 @@ def process_data(input_file: str, output_file: str) -> None:
         if idx % 50_000 == 0:
             print(f"      Progress: {idx:,} / {len(df):,} baris diproses...")
 
-        # Hanya cleaning baris WAHANA, non-WAHANA dikosongkan
         if is_wahana.iloc[idx - 1]:
-            c_polis = clean_polis(row.get("polis_ori", ""))
-            c_slip  = clean_slip(row.get("slip_ori", ""))
-            c_ins   = clean_insured(row.get("insured_ori", ""))
+
+            polis_ori = row.get("polis_ori", "")
+            clstd_polis = row.get("CLSDT_POLICY_NO", "")
+
+            # ====================================================
+            # TENTUKAN SUMBER POLIS CLEAN
+            # ====================================================
+
+            if _is_valid_clstd(clstd_polis):
+                polis_source = clstd_polis
+            else:
+                polis_source = polis_ori
+
+            c_polis = clean_polis(polis_source)
+
+            # ====================================================
+            # TENTUKAN SUMBER SLIP CLEAN
+            # ====================================================
+
+            slip_ori = row.get("slip_ori", "")
+            clstd_slip = row.get("CLSDT_SLIP_NO", "")
+
+            if _is_valid_clstd(clstd_slip):
+                slip_source = clstd_slip
+            else:
+                slip_source = slip_ori
+
+            c_slip = clean_slip(slip_source)
+
+            # ====================================================
+            # CLEAN INSURED
+            # ====================================================
+
+            c_ins = clean_insured(row.get("insured_ori", ""))
         else:
             c_polis, c_slip, c_ins = [], [], []
 
@@ -1388,5 +1524,9 @@ def process_data(input_file: str, output_file: str) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# ENTRY POINT - TEST RULE
+# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    print("MASUK MAIN")
     process_data(INPUT_FILE, OUTPUT_FILE)

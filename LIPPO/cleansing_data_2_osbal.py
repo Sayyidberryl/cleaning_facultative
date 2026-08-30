@@ -27,10 +27,10 @@ from openpyxl import load_workbook
 # ==============================================================================
 # 0. KONFIGURASI
 # ==============================================================================
-INPUT_FILE = "Lippo_INS_Data_2.xlsx"
+INPUT_FILE = "Data_2_Osbal.xlsx"
 SHEET_NAME = "Sheet0"
 HEADER_ROW = 0
-OUTPUT_FILE = "[2Juli2026] lippo_output_osbal.xlsx"
+OUTPUT_FILE = "[3Agustus2026] lippo_output_osbal.xlsx"
 CEDANT_FILTER = "LIPPO"
 
 CEDANT_COLUMN = "CCOS_COMP_NAME"
@@ -503,3 +503,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
