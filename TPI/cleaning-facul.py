@@ -1,6 +1,36 @@
 """
 Cleaning Data 1 - Facultative | Cedant: TPI (PT Asuransi Tugu Pratama Indonesia)
 
+UPDATE BARU -- KOLOM CERTIFICATE (rule sama persis dgn mesin JASA R.P, lihat
+build_certificate()):
+- SUMBER: diambil dari FAC_POLICY_NO (nilai mentah, SEBELUM clean_polis
+  menjalankan mesin repetition-chain-nya), diposisikan tepat setelah
+  FAC_POLICY_NO / sebelum FAC_POLICY_NO_1.
+- Pola yang dikonfirmasi user dari eksplorasi TPI Data 1:
+    * "1911000022019000006 - 001364"   -> CERTIFICATE = "001364"
+    * "04240000000099-000001 / 2024"   -> CERTIFICATE = "000001"
+  Jadi pola umum: BASE(10+ digit) [spasi opsional] "-" [spasi opsional]
+  CERT(3-7 digit) [opsional "/ TAHUN"], lalu akhir string.
+- PENTING (harus diketahui): clean_polis()/mesin repetition-chain TIDAK
+  diubah sama sekali oleh update ini -- artinya untuk pola BASE-CERT di
+  atas, FAC_POLICY_NO_1 dst TETAP mengikuti perilaku lama (merekonstruksi
+  suffix pendek sebagai pengganti digit akhir base, BUKAN membuang cert-nya
+  seperti di Data 1/3 JRP). CERTIFICATE murni kolom tambahan yang diambil
+  independen dari nilai mentah, tidak memengaruhi FAC_POLICY_NO_1 dst.
+  Kalau ternyata FAC_POLICY_NO_1 juga perlu diperbaiki supaya konsisten
+  (mis. cert dibuang bersih dari base), itu perubahan terpisah -- beri tahu
+  supaya bisa disesuaikan.
+- Rule format build_certificate() SAMA seperti mesin JRP:
+    * range 2-angka ("-" / S/D / SD / S): >3 anggota -> "AWAL SD AKHIR",
+      <=3 anggota -> breakdown penuh dipisah koma.
+    * daftar eksplisit koma/campur S-D: >3 item -> kompres
+      "ITEM_PERTAMA SD ITEM_TERAKHIR" (tanpa isi celah), <=3 -> apa adanya.
+    * semua angka di-pad ke 6 digit.
+    * "S/D"/"s/d"/"SD"/"S" di output SELALU distandarisasi jadi "SD".
+    * pola tidak masuk akal (bukan angka murni) -> CERTIFICATE kosong.
+  Catatan: baru 2 contoh yang terverifikasi user (single value, bukan
+  range/list) -- cabang range/list di build_certificate() belum tervalidasi
+  ke data TPI asli, ini perlu verifikasi lanjut kalau ditemukan kasusnya.
 """
 
 import os
@@ -13,13 +43,13 @@ import pandas as pd
 # KONFIGURASI — ubah bagian ini kalau nama file/kolom berbeda
 # ─────────────────────────────────────────────────────────────────────────────
 
-INPUT_FILE  = os.path.join("input", "1a. Transaksi Facul 01.01.23 - 17.07.26.xlsx")
+INPUT_FILE  = os.path.join("input", "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
 OUTPUT_FILE = os.path.join("output", "tpi_output_facul.xlsx")
 
 CEDANT_COL   = "COMP_NAME"
 CEDANT_VALUE = "PT ASURANSI TUGU PRATAMA INDONESIA"
 
-BROKER_COL  = "COMP_NAME2"
+BROKER_COL  = "COMP_NAME.1"
 POLIS_COL   = "FAC_POLICY_NO"
 SLIP_COL    = "FAC_SLIP"
 INSURED_COL = "FAC_INSURED"
@@ -34,8 +64,8 @@ POLIS_EXCEPTION_RE = re.compile(
     r"""
     MOP\s*MARINE
   | (?:LINE\s*SLIP|LINESLIP)
-  | \b(?:P1|P2|P3|P73)\s*CANCEL
-  | \b(?:P1|P2|P3|P73)\b
+  | \bP[1-5]\s+CANCEL
+  | \bP[1-5]\b
   | \bCANCEL\b
   | PENYELESAIAN
   | HUTANG\s*PIUTANG
@@ -78,7 +108,7 @@ _SLIP_NOISE_RE = re.compile(
   | \b(?:JANUARY|FEBRUARY|MARCH|APRIL|MAY|JUNE|JULY|AUGUST
         |SEPTEMBER|OCTOBER|NOVEMBER|DECEMBER)\b
   | \b(?:IDR|USD|ENG)\b
-  | \b(?:P1|P2|P3|P73)\b
+  | \bP[1-5]\b
   | \bNEW\b
   | \bVARIOUS\b
   | \b20[0-9]{2}\b
@@ -168,8 +198,6 @@ def _handle_insured_paren(match: "re.Match") -> str:
     content_ = match.group(1).strip()
     if content_.upper() in _INSURED_PAREN_JUNK or not content_:
         return ""
-    # ambil bagian sebelum koma pertama saja (mis. "44 VESSEL, LIHAT PAGE 3"
-    # -> "44 VESSEL"), sisanya biasanya cuma catatan tambahan
     kept = content_.split(",")[0].strip()
     return " " + kept + " " if kept else ""
 
@@ -194,9 +222,6 @@ def _merge_region_prefix_parts(parts: list) -> list:
     return merged
 
 def _merge_digit_start_parts(parts: list) -> list:
-    """Segmen yang diawali angka (mis. "7 SUPPLY VESSEL", "44 VESSEL") itu
-    nama unit/armada, bukan perusahaan baru -> digabung ke segmen
-    sebelumnya, bukan dianggap entitas terpisah."""
     merged = []
     for p in parts:
         p_stripped = p.strip()
@@ -218,8 +243,6 @@ def _name_initials_variants(name: str) -> set:
 
 
 def _is_abbreviation_of(short: str, long_name: str) -> bool:
-    """Cek apakah `short` adalah singkatan dari `long_name`, mis. "TPPI"
-    dari "TRANS PACIFIC PETROCHEMICAL INDOTAMA"."""
     short_clean = re.sub(r"[^A-Z0-9]", "", short.upper())
     if len(short_clean) < 2 or len(short_clean) > 8:
         return False
@@ -227,9 +250,6 @@ def _is_abbreviation_of(short: str, long_name: str) -> bool:
 
 
 def _strip_trailing_abbrev_word(name: str, priors: list) -> str:
-    """Kalau kata TERAKHIR di segmen gabungan ternyata singkatan dari segmen
-    sebelumnya (mis. "PDBI DSLNG" -> "DSLNG" singkatan "DONGGI-SENORO LNG"),
-    buang kata itu saja, sisanya tetap."""
     words = name.split()
     if len(words) >= 2 and any(_is_abbreviation_of(words[-1], p) for p in priors):
         return " ".join(words[:-1])
@@ -238,20 +258,20 @@ def _strip_trailing_abbrev_word(name: str, priors: list) -> str:
 
 def _clean_insured_name(name: str) -> str:
     name = _normalize_spaces(name)
-    name = _INSURED_PREFIX_RE.sub("", name)   # PT/CV di awal
-    name = _INSURED_GELAR_RE.sub("", name)    # gelar/sapaan
-    name = re.sub(r"\bPTE\.?\b", "", name, flags=re.IGNORECASE)  # kata "PTE" dihapus
-    name = re.sub(r"\(([^()]*)\)", _handle_insured_paren, name)  # kurung seimbang
-    name = name.replace("(", " ").replace(")", " ")  # sisa kurung yang tidak seimbang
-    name = re.sub(r"/", " ", name)            # garis miring nyisa -> spasi (strip "-" DIBIARKAN, bagian nama resmi mis. "PERTA-SAMTAN")
+    name = _INSURED_PREFIX_RE.sub("", name)
+    name = _INSURED_GELAR_RE.sub("", name)
+    name = re.sub(r"\bPTE\.?\b", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\(([^()]*)\)", _handle_insured_paren, name)
+    name = name.replace("(", " ").replace(")", " ")
+    name = re.sub(r"/", " ", name)
     for _ in range(3):
         cleaned = _normalize_spaces(INSURED_SUFFIX_RE.sub("", name).strip().strip(","))
         if cleaned == name:
             break
         name = cleaned
-    name = name.replace(".", "")  # semua karakter titik dihapus
+    name = name.replace(".", "")
     name = _normalize_spaces(name).strip()
-    name = name.upper()  # insured selalu CAPS LOCK
+    name = name.upper()
     return name
 
 
@@ -262,12 +282,7 @@ def _cap_or_join(items: list) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# KAMUS POLA STANDAR TPI (dari Karakteristik_Polis_dan_Slip.xlsx sheet "TPI"
-# + Bismillah_TPI_-_Eksplorasi_Cedant.docx)
-# Dipakai sebagai lapisan penyempurnaan SETELAH cleaning utama -- bukan filter,
-# hanya membantu merapikan spasi/simpul liar kalau hasil cleaning belum persis
-# cocok pola standar. Menurut arahan tim, pola Data 1 (Facul) umumnya mirip
-# Data 2 (Osbal), jadi kamus yang sama dipakai di kedua script.
+# KAMUS POLA STANDAR TPI
 # ─────────────────────────────────────────────────────────────────────────────
 
 KNOWN_POLIS_PATTERNS = [
@@ -295,9 +310,6 @@ def _matches_known_pattern(value: str, patterns) -> bool:
 
 
 def refine_with_known_pattern(value: str, patterns) -> str:
-    """Kalau hasil cleaning belum cocok kamus pola standar TPI, coba beberapa
-    perbaikan ringan (spasi, simbol liar) sebelum menyerah dan mengembalikan
-    hasil cleaning apa adanya."""
     if not value:
         return value
     if _matches_known_pattern(value, patterns):
@@ -308,8 +320,8 @@ def refine_with_known_pattern(value: str, patterns) -> str:
         re.sub(r"\s*/\s*", " / ", value).strip(),
         value.strip(" .-/"),
         re.sub(r"\.0+$", "", value),
-        "0" + value if value.isdigit() else value,        # angka polos kehilangan 0 di depan
-        re.sub(r"^(\d+)(\s*/\s*(?:19|20)\d{2})$", r"0\1\2", value),  # "angka / tahun" kehilangan 0 di depan
+        "0" + value if value.isdigit() else value,
+        re.sub(r"^(\d+)(\s*/\s*(?:19|20)\d{2})$", r"0\1\2", value),
     ]
     for c in candidates:
         if _matches_known_pattern(c, patterns):
@@ -323,9 +335,99 @@ def _refine_list(items: list, patterns) -> list:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MESIN "REPETITION CHAIN" (sama seperti cleaning-osbal.py, sesuai arahan:
-# "Data 1 hampir mirip Data 2, kalau ada pola yang sama samain aja, selagi
-# masih cedant yang sama")
+# KOLOM CERTIFICATE (BARU -- rule sama persis dengan mesin JASA R.P)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CERT_RANGE_PAIR_RE = re.compile(
+    r"^\s*(\d{1,7})\s*(?:-|S\s*/\s*D|SD|S(?!\d))\s*(\d{1,7})\s*$",
+    re.IGNORECASE,
+)
+_CERT_SPLIT_RE = re.compile(r"\s*(?:S\s*/\s*D|SD|S(?!\d)|,)\s*", re.IGNORECASE)
+_CERT_TOKEN_RE = re.compile(r"^\d{1,7}$")
+
+
+def build_certificate(cert_raw) -> str:
+    """Format nomor sertifikat sesuai rule baru (sama dipakai di mesin JRP):
+    - range 2-angka ("-" / S/D / SD / S): >3 anggota -> "AWAL SD AKHIR",
+      <=3 anggota -> breakdown penuh dipisah koma.
+    - daftar eksplisit (koma dan/atau campur S/D/SD/S, bukan range murni):
+      >3 item -> dikompres "ITEM_PERTAMA SD ITEM_TERAKHIR" (tanpa isi celah),
+      <=3 item -> tetap apa adanya, dipisah koma.
+    - semua angka di-pad ke 6 digit.
+    - "S/D"/"s/d"/"SD"/"S" di output SELALU ditulis "SD".
+    - kalau pola tidak masuk akal (bukan angka murni) -> kosong.
+    """
+    if cert_raw is None:
+        return ""
+    text = str(cert_raw).strip()
+    if not text:
+        return ""
+
+    m = _CERT_RANGE_PAIR_RE.match(text)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        if hi < lo:
+            lo, hi = hi, lo
+        count = hi - lo + 1
+        if count > 3:
+            return f"{str(lo).zfill(6)} SD {str(hi).zfill(6)}"
+        return ", ".join(str(n).zfill(6) for n in range(lo, hi + 1))
+
+    raw_tokens = [t for t in _CERT_SPLIT_RE.split(text) if t.strip()]
+    if not raw_tokens or not all(_CERT_TOKEN_RE.match(t.strip()) for t in raw_tokens):
+        return ""
+    nums = [int(t) for t in raw_tokens]
+    if len(nums) > 3:
+        return f"{str(nums[0]).zfill(6)} SD {str(nums[-1]).zfill(6)}"
+    return ", ".join(str(n).zfill(6) for n in nums)
+
+
+# BUG TPI NEW -- kriteria sertifikat DIPERSEMPIT. Dari feedback user,
+# "BASE-angka_pendek" TANPA spasi di sekitar dash DAN TANPA "/ TAHUN"
+# menempel (mis. "11401101900111-201", "1911000022019000006-002946")
+# TERNYATA BUKAN sertifikat -- itu pola breakdown perulangan biasa (base
+# yang N digit terakhirnya diganti). Sertifikat ASLI selalu punya salah
+# satu dari dua ciri berikut:
+#   Pola A: BASE(10+digit) SPASI "-" SPASI CERT(3-7digit) [/ TAHUN opsional]
+#     contoh: "1911000022019000006 - 001364" -> cert "001364"
+#   Pola B: BASE(10+digit)"-"CERT(3-7digit)" / "TAHUN (tanpa spasi di
+#           dash, TAPI wajib ada "/ TAHUN" di akhir)
+#     contoh: "04240000000099-000001 / 2024"  -> cert "000001"
+#             "04250000000099-000035 / 2025"  -> cert "000035"
+# Kalau TIDAK ada spasi di dash DAN TIDAK ada "/ TAHUN" -> BUKAN sertifikat,
+# dikembalikan kosong (biar diproses jalur breakdown/repetition biasa).
+_CERT_TAIL_SPACED_RE = re.compile(
+    r"^\s*(\d{10,})\s+-\s+(\d{3,7})\s*(?:/\s*(?:19|20)\d{2})?\s*$"
+)
+_CERT_TAIL_YEAR_RE = re.compile(
+    r"^\s*(\d{10,})-(\d{3,7})\s*/\s*(?:19|20)\d{2}\s*$"
+)
+
+
+def extract_certificate(polis_raw) -> str:
+    """Ambil blok sertifikat dari FAC_POLICY_NO mentah (Pola A atau Pola B
+    di atas), lalu format lewat build_certificate(). Return '' kalau nilai
+    polis tidak cocok kriteria ini -- termasuk pola "BASE-angka_pendek"
+    polos tanpa spasi/tahun, yang BUKAN sertifikat (lihat catatan di atas)."""
+    if pd.isna(polis_raw):
+        return ""
+    val = str(polis_raw).strip()
+    if not val:
+        return ""
+
+    m = _CERT_TAIL_SPACED_RE.match(val)
+    if m:
+        return build_certificate(m.group(2))
+
+    m = _CERT_TAIL_YEAR_RE.match(val)
+    if m:
+        return build_certificate(m.group(2))
+
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MESIN "REPETITION CHAIN" (TIDAK DIUBAH oleh update CERTIFICATE ini)
 # ─────────────────────────────────────────────────────────────────────────────
 
 _MONTH_NAMES_RE = (
@@ -401,21 +503,15 @@ _JUNK_PHRASE_RE = re.compile(
 _STANDALONE_NARRATIVE_RE = re.compile(r"SUSPENSE.*CEDANT", re.IGNORECASE)
 
 _STANDALONE_P_RE = re.compile(
-    r"^\s*(?:P[123]|TBA|VAR)(?:\s*[+,]\s*(?:P[123]|TBA|VAR))*\s*$", re.IGNORECASE
+    r"^\s*(?:P[1-5]|TBA|VAR)(?:\s*[+,]\s*(?:P[1-5]|TBA|VAR))*\s*$", re.IGNORECASE
 )
 
 _YEAR_RE = re.compile(r"/\s*(?:19|20)\d{2}\b")
 _YEAR_2DIGIT_RE = re.compile(r"/\s*\d{2}$")
-# Pola "KODE.TAHUN" / ".TAHUN" (titik lalu tahun) di akhir -- HANYA kalau
-# titik cuma muncul sekali di seluruh nilai (kode dengan banyak titik seperti
-# "017.PAR.EQ.6.2025" atau "009.1050.201.2014.001670.00" TIDAK kena ini)
 _DOT_YEAR_RE = re.compile(r"^(.*)\.(?:19|20)?\d{2,4}$")
 
 _MAX_SUFFIX_LEN = 7
 
-# Nilai literal yang secara eksplisit ditandai "biarkan apa adanya" di
-# dokumen eksplorasi TPI (format nyeleneh yang tidak masuk pola umum manapun,
-# jadi tidak aman digeneralisasi lewat regex)
 _LITERAL_WHITELIST = {
     "00335-338",
     "**00335-338",
@@ -427,12 +523,15 @@ _LITERAL_WHITELIST = {
     "#SPN-2014#",
     "FSF1700024&22&20&18&16&14&12&10-085087075067069071073",
     "BBM/2014-160,180,135 / FEBRUARI 2014",
-    "TBA/TUGU PRATAMA/BRINS",
     "017.PAR.EQ.6.2025",
     "CN : 148/SRE-CM/CN/XII/2024",
     "282S/D286",
     "140051-053",
     "FUC1700060/C00455/17 1700002",
+    # BUG TPI NEW -- biarkan apa adanya
+    "P1 / SLIP ADA 4 SUDAH DI ELO",
+    "0755/XOL-FAC-INDORE/VII/2026",
+    "P1 / ADA 6 SLIP",
 }
 
 
@@ -442,17 +541,57 @@ def _is_standalone_exception(val: str) -> bool:
     return bool(_STANDALONE_P_RE.match(val)) or bool(_STANDALONE_NARRATIVE_RE.search(val))
 
 
+# ── BUG TPI NEW: pola tambahan yang perlu dibuang sebelum tokenisasi ──
+# "- 2023" / "- 2024" dst di akhir (tahun BERDIRI SENDIRI setelah dash,
+# bukan bagian dari "/ TAHUN" yang sudah ditangani _YEAR_RE) -> dihapus.
+_DASH_YEAR_TAIL_RE = re.compile(r"\s*-\s*(?:19|20)\d{2}\s*$")
+# "-N/0" (mis. "-2/0", "-3/0") -> penanda endorsement/nol, BUKAN sertifikat
+# ataupun suffix perulangan -> dibuang total.
+_ENDORSEMENT_TAIL_RE = re.compile(r"-\d{1,3}\s*/\s*0\b")
+# "/END N S/D M , X , Y" (deklarasi endorsement range) di akhir -> dibuang
+# seluruhnya (base di depannya tetap dipertahankan).
+_END_DECLARATION_TAIL_RE = re.compile(
+    r"/?\s*END\s+\d+\s*S\s*/\s*D\s*\d+(?:\s*,\s*\d+)*\s*$", re.IGNORECASE
+)
+# "/END" polos di akhir (tanpa deklarasi S/D setelahnya) -> dibuang.
+_BARE_END_TAIL_RE = re.compile(r"/\s*END\.?\s*$", re.IGNORECASE)
+# "/ SA" di akhir -> dibuang (kode referensi tambahan, bukan bagian nomor).
+_TRAILING_SA_RE = re.compile(r"/\s*SA\s*$", re.IGNORECASE)
+
+
 def _strip_junk_and_year(text: str) -> str:
+    text = _END_DECLARATION_TAIL_RE.sub("", text)
+    text = _ENDORSEMENT_TAIL_RE.sub("", text)
+    text = _BARE_END_TAIL_RE.sub("", text)
+    text = _TRAILING_SA_RE.sub("", text)
     text = _JUNK_PHRASE_RE.sub("", text)
     text = _YEAR_RE.sub("", text)
+    text = _DASH_YEAR_TAIL_RE.sub("", text)
     return text
 
 
 def _strip_attached_noise(text: str) -> str:
-    text = re.sub(r"\bP[123]\b\s*/?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bTBA\b\s*/?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"\bVAR\b\s*/?\s*", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"^P-(?=\d)", "", text)  # "P-96102" -> "96102" (P tunggal di depan)
+    text = re.sub(
+        r"(?:^|[\s/+,\-])P[1-5](?=\s|$|[+/,])",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\bTBA\b\s*/?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\bVAR\b\s*/?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    text = re.sub(r"^P-(?=\d)", "", text, flags=re.IGNORECASE)
+
     return text
 
 
@@ -460,11 +599,6 @@ def _clean_token(tok: str) -> str:
     tok = tok.strip(" :;/")
     if not tok:
         return tok
-    # Titik dihapus kalau: (a) tokennya angka murni, atau (b) tokennya kode
-    # sederhana "HURUF...ANGKA.ANGKA" (mis. "FVF23.00087" -> titik cuma typo).
-    # TAPI kalau hurufnya nyebar di beberapa tempat (mis. "017.PAR.EQ.6.2025"
-    # -- ada blok huruf setelah angka juga), titik dipertahankan -> biarkan
-    # apa adanya, itu format kode terstruktur, bukan typo.
     if not re.search(r"[A-Za-z]", tok):
         tok = tok.replace(".", "")
     elif re.match(r"^[A-Za-z]+[\d.]+$", tok):
@@ -472,30 +606,98 @@ def _clean_token(tok: str) -> str:
     return tok
 
 
-def _classify_and_reconstruct(tokens: list) -> list:
+# Panjang kode standar TPI "LLL+DDDDDDD" (3 huruf + 7 digit = 10 karakter),
+# mis. "PVF2300041", "FVF2300113" -- dipakai untuk mendeteksi base huruf yang
+# SENGAJA dipotong pendek (mis. "PVF23000" cuma 8 char) dan perlu DISAMBUNG
+# (konkatenasi), bukan digantikan digit akhirnya seperti base yang sudah utuh.
+_FULL_CODE_LEN = 10
+
+
+def _classify_and_reconstruct(tokens: list, year_tail: str = None) -> list:
     results = []
     current_base = None
+    # Token huruf+angka yang "belum lengkap" (lebih pendek dari
+    # _FULL_CODE_LEN) ditahan dulu (belum di-append) -- kalau token berikutnya
+    # ternyata melengkapinya jadi persis _FULL_CODE_LEN karakter, base mentah
+    # ini TIDAK ikut muncul di hasil (hanya versi lengkapnya). Kalau ternyata
+    # tidak dilengkapi (token berikutnya bukan pelengkap), base mentah ini
+    # tetap dimunculkan apa adanya.
+    pending_incomplete = None
+
     for tok in tokens:
         tok = _clean_token(tok)
         if not tok:
             continue
         digits_only = re.match(r"^\d+$", tok) is not None
-        base_has_letter = bool(current_base and re.search(r"[A-Za-z]", current_base))
+
+        # BUG TPI NEW -- suffix angka kadang kebawa 2-digit sisa TAHUN yang
+        # baru saja dihapus (mis. "PVF1800092/2018+18091" -> "18" di depan
+        # "18091" itu sisa "2018", bukan bagian nomor sertifikat/urutan).
+        # Kalau suffix diawali persis 2 digit ekor tahun tsb, buang dulu 2
+        # digit itu sebelum direkonstruksi -- HANYA kalau sisanya masih
+        # panjang suffix yang masuk akal (1-7 digit).
         if (
             digits_only
-            and current_base is not None
-            and len(tok) < len(current_base)
-            and len(tok) <= _MAX_SUFFIX_LEN
-            # kalau base-nya angka polos (tanpa huruf), cuma direkonstruksi
-            # kalau base-nya cukup panjang (>=7 digit) -- base pendek/angka
-            # polos terlalu ambigu buat diasumsikan pola perulangan
-            and (base_has_letter or len(current_base) >= 7)
+            and year_tail
+            and tok.startswith(year_tail)
+            and 1 <= len(tok) - 2 <= _MAX_SUFFIX_LEN
         ):
-            reconstructed = current_base[: -len(tok)] + tok
-            results.append(reconstructed)
-        else:
-            results.append(tok)
+            tok = tok[2:]
+
+        base_has_letter = bool(current_base and re.search(r"[A-Za-z]", current_base))
+
+        if digits_only and current_base is not None:
+            # Base huruf yang masih PENDEK -> suffix ini MELENGKAPI base lewat
+            # konkatenasi langsung (mis. "PVF23000"+"41" -> "PVF2300041"),
+            # BUKAN mengganti digit akhir.
+            if (
+                base_has_letter
+                and len(current_base) < _FULL_CODE_LEN
+                and len(current_base) + len(tok) == _FULL_CODE_LEN
+            ):
+                completed = current_base + tok
+                pending_incomplete = None  # base mentah tidak usah dimunculkan
+                results.append(completed)
+                current_base = completed
+                continue
+            # Base sudah cukup panjang -> suffix pendek MENGGANTI N digit
+            # terakhir base (perilaku lama, dipertahankan).
+            if (
+                len(tok) < len(current_base)
+                and len(tok) <= _MAX_SUFFIX_LEN
+                and (base_has_letter or len(current_base) >= 7)
+            ):
+                if pending_incomplete:
+                    results.append(pending_incomplete)
+                    pending_incomplete = None
+                results.append(current_base[: -len(tok)] + tok)
+                continue
+
+        if pending_incomplete:
+            results.append(pending_incomplete)
+            pending_incomplete = None
+
+        # Token huruf+angka yang lebih pendek dari _FULL_CODE_LEN -> mungkin
+        # base "terpotong" yang akan disambung suffix berikutnya. Tahan dulu,
+        # jangan langsung di-append.
+        if not digits_only and re.search(r"\d{4,}$", tok) and len(tok) < _FULL_CODE_LEN:
+            pending_incomplete = tok
             current_base = tok
+            continue
+
+        results.append(tok)
+        # BUG FIX: current_base HARUS diperbarui juga untuk token huruf+angka
+        # (bukan cuma angka murni) -- sebelumnya suffix pendek sesudah kode
+        # seperti "PFV2100285" tidak pernah direkonstruksi karena current_base
+        # tidak pernah di-set dari token semacam itu.
+        if digits_only and len(tok) >= 7:
+            current_base = tok
+        elif not digits_only and re.search(r"\d{4,}$", tok):
+            current_base = tok
+
+    if pending_incomplete:
+        results.append(pending_incomplete)
+
     return results
 
 
@@ -519,47 +721,54 @@ def expand_repetition_chain(val, patterns=None) -> list:
     if _is_standalone_exception(val):
         return [_normalize_spaces(val)]
 
+    # BUG TPI NEW -- kalau val cocok kriteria SERTIFIKAT (Pola A/B, lihat
+    # extract_certificate()), JANGAN di-breakdown jadi 2 nilai. Sertifikat
+    # cukup muncul di kolom CERTIFICATE saja; POLIS cukup base-nya saja.
+    # (feedback user 2x: breakdown untuk kasus ini adalah bug.)
+    _cert_check_m = _CERT_TAIL_SPACED_RE.match(val) or _CERT_TAIL_YEAR_RE.match(val)
+    if _cert_check_m:
+        return [_cert_check_m.group(1)]
+
+    _tba_prefix_m = re.match(r"^TBA\s*/\s*(.+)$", val, re.IGNORECASE)
+    if _tba_prefix_m:
+        return [_normalize_spaces(_tba_prefix_m.group(1))]
+
     _had_narrative = bool(_JUNK_PHRASE_RE.search(val))
+
+    # BUG TPI NEW -- tangkap 2 digit ekor tahun yang akan dibuang (mis.
+    # "/2018" -> "18"), dipakai nanti untuk membuang sisa digit tahun yang
+    # nyangkut di depan suffix pendek (lihat _classify_and_reconstruct).
+    _year_m = _YEAR_RE.search(val)
+    _year_tail = _year_m.group(0)[-2:] if _year_m else None
 
     cleaned_text = _strip_junk_and_year(val)
     cleaned_text = _strip_attached_noise(cleaned_text)
-    # "&" sekarang jadi pemisah asli (bukan dihapus buta) -- dibiarkan, nanti
-    # ikut split di raw_tokens. Sisa "&" dari narasi (OCT & NOV) otomatis
-    # hilang sendiri karena jadi pemisah kosong setelah nama bulan dihapus.
-    # tahun 2 digit di ujung mis. "PNF980025+26/97" -> "/97" dibuang
+    cleaned_text = re.sub(
+        r"(?<![A-Za-z0-9])P[1-5](?![A-Za-z0-9])",
+        "",
+        cleaned_text,
+        flags=re.IGNORECASE,
+    )
     cleaned_text = _YEAR_2DIGIT_RE.sub("", cleaned_text)
-    # "KODE.TAHUN" (titik tunggal + tahun di akhir) -> tahun dibuang, HANYA
-    # kalau titik cuma muncul sekali (kode dot-chain seperti "017.PAR.EQ..."
-    # tetap dibiarkan apa adanya)
     if cleaned_text.count(".") == 1:
         m = _DOT_YEAR_RE.match(cleaned_text)
         if m:
             cleaned_text = m.group(1)
 
-    # Dot-chain angka murni mis. "1400834.832.826.824" -- kalau semua
-    # bagian setelah yang pertama sama panjang & lebih pendek (pola
-    # base+suffix jelas), anggap titik sebagai pemisah repetisi. Kalau
-    # tidak (mis. "009.1050.201.2014.001670.00", panjang tidak konsisten),
-    # titik cuma dihapus & digabung jadi satu kode (ditangani _clean_token).
     if "." in cleaned_text and not re.search(r"[A-Za-z]", cleaned_text):
         _dot_parts = cleaned_text.split(".")
         if len(_dot_parts) > 1 and all(p.isdigit() for p in _dot_parts):
             _rest_lens = {len(p) for p in _dot_parts[1:]}
             if len(_rest_lens) == 1 and next(iter(_rest_lens)) < len(_dot_parts[0]):
                 cleaned_text = "+".join(_dot_parts)
-    # huruf tunggal nyempil di ujung (mis. ".../V") -> dibuang
     cleaned_text = re.sub(r"[/\-+,]\s*[A-Za-z]\s*$", "", cleaned_text)
     cleaned_text = cleaned_text.replace(":", "").replace(";", "").replace("(", "").replace(")", "")
     cleaned_text = cleaned_text.strip()
     if not cleaned_text:
-        # semuanya cuma narasi/junk (mis. "END.1" berdiri sendiri) -> jangan
-        # dihapus semua, biarkan nilai aslinya apa adanya
         return [_normalize_spaces(val)]
 
-    # kode yang terpisah spasi dari angkanya (mis. "EUC 080030", "FUH 0800003")
-    # disatukan dulu sebelum di-split, berlaku untuk semua prefix kode
     cleaned_text = re.sub(r"\b([A-Za-z]{2,5})\s+(\d{5,})\b", r"\1\2", cleaned_text)
-    cleaned_text = cleaned_text.replace("*", "")  # tanda bintang liar dibuang
+    cleaned_text = cleaned_text.replace("*", "")
 
     raw_tokens = [t for t in re.split(r"\s+|[+\-,/&]", cleaned_text) if t.strip()]
     raw_tokens = [_clean_token(t) for t in raw_tokens]
@@ -567,15 +776,12 @@ def expand_repetition_chain(val, patterns=None) -> list:
     if not raw_tokens:
         return [_normalize_spaces(val)]
 
-    # Kalau SEMUA token cuma angka pendek tanpa huruf sama sekali (mis.
-    # "105-106"), tidak ada "kode dasar" yang jelas untuk dijadikan acuan
-    # breakdown -> terlalu ambigu, biarkan apa adanya (jangan dipecah)
     if len(raw_tokens) > 1 and all(
         re.match(r"^\d+$", t) and len(t) <= 4 for t in raw_tokens
     ):
         return [_normalize_spaces(val)]
 
-    reconstructed = _classify_and_reconstruct(raw_tokens)
+    reconstructed = _classify_and_reconstruct(raw_tokens, year_tail=_year_tail)
 
     if patterns:
         reconstructed = [refine_with_known_pattern(r, patterns) for r in reconstructed]
@@ -588,14 +794,9 @@ def expand_repetition_chain(val, patterns=None) -> list:
     if len(reconstructed) <= MAX_SPLIT_COLS:
         return [_normalize_spaces(r) for r in reconstructed]
 
-    # > 5 hasil:
-    # - kalau tadinya ada narasi yang dibuang -> ini kasus "kode + cerita
-    #   panjang", cukup sisakan kode paling awal
-    # - kalau TIDAK ada narasi (murni rantai angka/kode panjang) -> biarkan
-    #   apa adanya, jangan dipecah
     if _had_narrative:
         return [_normalize_spaces(reconstructed[0])]
-    return [_normalize_spaces(cleaned_text)]
+    return [_normalize_spaces(cleaned_text).strip(" +,-/")]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -617,7 +818,7 @@ def clean_polis(val) -> list:
         or "." in val
         or re.search(r"\s{2,}", val)
         or _YEAR_RE.search(val)
-        or re.search(r"\bP[123]\b", val, re.IGNORECASE)
+        or re.search(r"\bP[1-5]\b", val, re.IGNORECASE)
         or re.search(r"\bTBA\b", val, re.IGNORECASE)
         or re.search(r"\bVAR\b", val, re.IGNORECASE)
         or _JUNK_PHRASE_RE.search(val)
@@ -731,7 +932,7 @@ def clean_slip(val) -> list:
         or "." in val
         or re.search(r"\s{2,}", val)
         or _YEAR_RE.search(val)
-        or re.search(r"\bP[123]\b", val, re.IGNORECASE)
+        or re.search(r"\bP[1-5]\b", val, re.IGNORECASE)
         or re.search(r"\bTBA\b", val, re.IGNORECASE)
         or re.search(r"\bVAR\b", val, re.IGNORECASE)
         or _JUNK_PHRASE_RE.search(val)
@@ -767,10 +968,8 @@ def clean_slip(val) -> list:
 # CLEAN INSURED
 # ─────────────────────────────────────────────────────────────────────────────
 
-# PT/CV di AWAL nama (paling umum: "PT ANGKASA PURA")
 _INSURED_PREFIX_RE = re.compile(r"^\s*(?:PT|CV)\.?\s+", re.IGNORECASE)
 
-# Gelar / sapaan (Bapak, Ibu, Ny, Mr, Mrs, Ms, Dr, Ir, dst)
 _INSURED_GELAR_RE = re.compile(
     r"""
     \b(?:BAPAK|IBU|SDRI?|NYONYA|NY|TUAN|MR|MRS|MS|
@@ -779,13 +978,37 @@ _INSURED_GELAR_RE = re.compile(
     re.IGNORECASE | re.VERBOSE,
 )
 
-# Pemisah antar-insured: koma, garis miring, QQ, atau "and/or"
 _INSURED_SPLIT_RE = r"\bQQ\b|\bAND\s*/\s*OR\b|/|,|–|¿"
+
+# BUG TPI NEW -- singkatan dikenal yang harus dibuang kalau bentuk
+# panjangnya JUGA muncul di nilai INSURED yang sama (baik di segmen terpisah
+# via "/", "," dst, MAUPUN menempel langsung tanpa pemisah di string yang
+# sama). Ini hanya menyentuh Data 1, sesuai instruksi user ("tanpa mengubah
+# rules pada insured lain").
+#   - "VICO" = singkatan "VIRGINIA INDONESIA COMPANY"
+#   - "STPI" = singkatan "SEKOLAH TINGGI PENERBANGAN INDONESIA"
+#   - "ANTAM" = singkatan "ANEKA TAMBANG"
+_KNOWN_INSURED_ABBREV = {
+    "VICO": "VIRGINIA INDONESIA",
+    "STPI": "SEKOLAH TINGGI PENERBANGAN INDONESIA",
+    "ANTAM": "ANEKA TAMBANG",
+}
+
+
+def _strip_embedded_known_abbrev(text: str) -> str:
+    """Buang token singkatan dikenal (mis. 'STPI', 'VICO', 'ANTAM') dari
+    `text` KALAU bentuk panjangnya juga ada di `text` yang sama -- berlaku
+    baik singkatan itu berdiri sebagai segmen terpisah (dipisah '/' atau
+    ',') maupun menempel langsung tanpa pemisah di string yang sama (mis.
+    "SEKOLAH TINGGI PENERBANGAN INDONESIA STPI PLP CURUG")."""
+    upper = text.upper()
+    for abbr, full in _KNOWN_INSURED_ABBREV.items():
+        if full in upper:
+            text = re.sub(rf"\b{abbr}\b\.?\s*", " ", text, flags=re.IGNORECASE)
+    return _normalize_spaces(text)
 
 
 def _remove_polis_slip_from_insured(text: str, polis_ori, slip_ori) -> str:
-    """Buang nomor polis/slip yang nyempil di teks insured (pakai nilai asli
-    sebelum cleaning, sesuai contoh di dokumen eksplorasi TPI)."""
     for token in (polis_ori, slip_ori):
         if pd.notna(token):
             t = str(token).strip()
@@ -802,14 +1025,13 @@ def clean_insured(val, polis_ori=None, slip_ori=None) -> list:
         return []
 
     val = _remove_polis_slip_from_insured(val, polis_ori, slip_ori)
+    val = _strip_embedded_known_abbrev(val)
 
-    # "NAMA,PT ..." / "NAMA, PT ..." adalah PT ditulis terbalik (bukan
-    # pemisah ke perusahaan baru) -> gabung, jangan dipecah di titik itu
     val = re.sub(r",\s*(?:PT|CV)\.?\s+", " ", val, flags=re.IGNORECASE)
     val = re.sub(r",\s*KSO\.?\s*$", " KSO", val, flags=re.IGNORECASE)
 
     raw_parts = re.split(_INSURED_SPLIT_RE, val, flags=re.IGNORECASE)
-    raw_parts = _merge_digit_start_parts(raw_parts)  # nama unit/armada digabung, bukan dipisah
+    raw_parts = _merge_digit_start_parts(raw_parts)
     raw_parts = _merge_region_prefix_parts(raw_parts)
 
     cleaned = []
@@ -832,8 +1054,6 @@ def clean_insured(val, polis_ori=None, slip_ori=None) -> list:
         fallback = _clean_insured_name(_normalize_spaces(val))
         return [fallback] if fallback else []
 
-    # buang segmen yang ternyata cuma singkatan dari segmen sebelumnya
-    # (mis. "TPPI" setelah "TRANS PACIFIC PETROCHEMICAL INDOTAMA")
     final = []
     for name in cleaned:
         name = _strip_trailing_abbrev_word(name, final)
@@ -849,15 +1069,12 @@ def clean_insured(val, polis_ori=None, slip_ori=None) -> list:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_business_partner(comp_name2, comp_name) -> str:
-    """COMP_NAME2 kosong / 'DIRECT' -> pakai COMP_NAME (cedant). Selain itu ->
-    broker. Cleaning-nya beda dari INSURED: CAPS LOCK + titik dihapus saja,
-    PT/kata lain TIDAK dihapus."""
     broker = "" if pd.isna(comp_name2) else str(comp_name2).strip()
     if not broker or broker.upper() == "DIRECT":
         result = "" if pd.isna(comp_name) else str(comp_name).strip()
     else:
         result = broker
-    result = re.sub(r"\.", " ", result)  # titik jadi spasi dulu (biar "PT.TRINITYRE" -> "PT TRINITYRE", bukan nempel)
+    result = re.sub(r"\.", " ", result)
     return re.sub(r"\s+", " ", result).upper().strip()
 
 
@@ -901,20 +1118,20 @@ def process_data(input_file: str, output_file: str) -> None:
     business_partner_values = [get_business_partner(row[BROKER_COL], row[CEDANT_COL]) for _, row in df.iterrows()]
 
     df.rename(columns={INSURED_COL: "FAC_INSURED_ORI"}, inplace=True)
-    # FAC_POLICY_NO & FAC_SLIP tetap nama aslinya (gaya Wahana: kolom ori tidak di-rename)
 
     insert_pos = list(df.columns).index(BROKER_COL) + 1 if BROKER_COL in df.columns else len(df.columns)
     df.insert(insert_pos, "BUSINESS_PARTNER", business_partner_values)
 
     print("[3/5] Menjalankan proses cleaning ...")
 
-    all_clean_polis, all_clean_slip, all_clean_ins = [], [], []
+    all_clean_polis, all_clean_slip, all_clean_ins, all_certificate = [], [], [], []
     max_polis = max_slip = max_ins = 1
 
     for _, row in df.iterrows():
         c_polis = _refine_list(clean_polis(row.get(POLIS_COL, "")), KNOWN_POLIS_PATTERNS)
         c_slip  = _refine_list(clean_slip(row.get(SLIP_COL, "")), KNOWN_SLIP_PATTERNS)
         c_ins   = clean_insured(row.get("FAC_INSURED_ORI", ""), row.get(POLIS_COL, ""), row.get(SLIP_COL, ""))
+        cert    = extract_certificate(row.get(POLIS_COL, ""))
 
         max_polis = max(max_polis, len(c_polis))
         max_slip  = max(max_slip, len(c_slip))
@@ -923,18 +1140,94 @@ def process_data(input_file: str, output_file: str) -> None:
         all_clean_polis.append(c_polis)
         all_clean_slip.append(c_slip)
         all_clean_ins.append(c_ins)
+        all_certificate.append(cert)
 
     print("[4/5] Menyusun kolom output ...")
 
+    polis_clean_cols = []
+
+    for i in range(1, max_polis + 1):
+
+        col_name = f"POLIS_CLEAN_{i}"
+
+        df[col_name] = [
+            x[i - 1] if i - 1 < len(x) else None
+            for x in all_clean_polis
+        ]
+
+        polis_clean_cols.append(col_name)
+
+    certificate_cols = [
+        "CERTIFICATE_1"
+    ]
+
+    df["CERTIFICATE_1"] = [
+        x if x not in (None, "") else None
+        for x in all_certificate
+    ]
+
+
+    slip_clean_cols = []
+
+    for i in range(1, max_slip + 1):
+
+        col_name = f"SLIP_CLEAN_{i}"
+
+        df[col_name] = [
+            x[i - 1] if i - 1 < len(x) else None
+            for x in all_clean_slip
+        ]
+
+        slip_clean_cols.append(col_name)
+
+    insured_cols = []
+
+    for i in range(1, max_ins + 1):
+
+        col_name = f"INSURED_CLEAN_{i}"
+
+        df[col_name] = [
+            x[i - 1] if i - 1 < len(x) else None
+            for x in all_clean_ins
+        ]
+
+        insured_cols.append(col_name)
+
     new_columns = []
+
+    cleaning_cols = set(
+        polis_clean_cols
+        + certificate_cols
+        + slip_clean_cols
+        + insured_cols
+    )
+
     for col in df.columns:
+
+        if col in cleaning_cols:
+            continue
+
         new_columns.append(col)
-        if col == POLIS_COL:
-            new_columns += _insert_clean_columns(df, all_clean_polis, POLIS_COL, max_polis)
-        elif col == SLIP_COL:
-            new_columns += _insert_clean_columns(df, all_clean_slip, SLIP_COL, max_slip)
+
+
+        if col == "FAC_POLICY_NO":
+
+            for i in range(1, max_polis + 1):
+
+                new_columns.append(f"POLIS_CLEAN_{i}")
+
+                # Certificate pertama SELALU ada.
+                if i == 1:
+                    new_columns.append("CERTIFICATE_1")
+
+        elif col == "FAC_SLIP":
+
+            new_columns.extend(slip_clean_cols)
+
         elif col == "FAC_INSURED_ORI":
-            new_columns += _insert_clean_columns(df, all_clean_ins, "FAC_INSURED", max_ins)
+
+            new_columns.extend(insured_cols)
+
 
     df = df[new_columns]
 

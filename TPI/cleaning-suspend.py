@@ -1,6 +1,13 @@
 """
 Cleaning Data 3 - Suspend | Cedant: TPI (PT Asuransi Tugu Pratama Indonesia)
 
+UPDATE BARU -- KOLOM CERTIFICATE:
+- Berdasarkan eksplorasi pola polis TPI Data 3, TIDAK ditemukan pola
+  sertifikat (base+"-"+cert) yang menempel di kolom POLIS -- berbeda dari
+  Data 1 & Data 2. Kolom CERTIFICATE tetap DITAMBAHKAN (untuk konsistensi
+  struktur output antar cedant/data), tapi SELALU DIKOSONGKAN.
+- Kalau di kemudian hari ditemukan pola sertifikat di Data 3 TPI, tinggal
+  isi fungsi extract_certificate() di bawah (saat ini return "" selalu).
 """
 
 import os
@@ -13,14 +20,19 @@ import pandas as pd
 # KONFIGURASI — ubah bagian ini kalau nama file/kolom berbeda
 # ─────────────────────────────────────────────────────────────────────────────
 
-INPUT_FILE  = os.path.join("input", "3a. Database Suspense 170726.xlsx")
-INPUT_SHEET = "Detail Database"
+INPUT_FILE  = os.path.join("input", "3b. Database Suspense 150826.xlsx")
+INPUT_SHEET = "Sheet1"
 HEADER_ROW  = 2          # header data ada di baris ke-3 file (index 2, 0-based)
 
 OUTPUT_FILE = os.path.join("output", "tpi_output_suspend.xlsx")
 
 CEDANT_FILTER_COL   = "CEDANT SHRT NAME"
 CEDANT_FILTER_VALUE = "TPI"
+
+# Rule baru: hanya baris berstatus SUSPENSE yang dicleaning & ditampilkan;
+# baris ADJUSTED dibuang total sebelum proses cleaning.
+STATUS_COL          = "STATUS"
+STATUS_KEEP_VALUE   = "SUSPENSE"
 
 INSURED_COL = "INSURED"
 POLIS_COL   = "POLIS"
@@ -59,7 +71,7 @@ _INSURED_JUNK_WORDS = frozenset({
     "SUBSIDIARY", "SUBSIDIARIES", "ANY SUBSIDIARY COMPANY",
     "RELATED COMPANY",
     "FOR THEIRS RESPECTIVE RIGHTS AND INTEREST",
-    "MIGRASI AS400", "THE PRINCIPAL", "PRINCIPAL", "OWNER",
+    "MIGRASI AS400", "THE PRINCIPAL", "PRINCIPAL", "OWNER", "REFUND PREMI",
 })
 
 # P1 / P2 / P3 tetap dipertahankan apa adanya (sesuai catatan eksplorasi TPI)
@@ -69,9 +81,6 @@ _POLIS_KEEP_AS_IS_RE = re.compile(r"^\s*P[123]\s*/", re.IGNORECASE)
 # ─────────────────────────────────────────────────────────────────────────────
 # KAMUS POLA STANDAR TPI (dari Karakteristik_Polis_dan_Slip.xlsx sheet "TPI"
 # + Bismillah_TPI_-_Eksplorasi_Cedant.docx)
-# Dipakai sebagai lapisan penyempurnaan SETELAH cleaning utama -- bukan filter,
-# hanya membantu merapikan spasi/simpul liar kalau hasil cleaning belum persis
-# cocok pola standar.
 # ─────────────────────────────────────────────────────────────────────────────
 
 KNOWN_POLIS_PATTERNS = [
@@ -126,6 +135,17 @@ def refine_with_known_pattern(value: str, patterns) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# KOLOM CERTIFICATE (BARU) -- TIDAK ADA POLA SERTIFIKAT DI DATA 3 TPI,
+# SELALU DIKOSONGKAN. Lihat catatan di docstring atas file.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def extract_certificate(polis_raw) -> str:
+    """Data 3 TPI tidak punya pola sertifikat yang menempel di POLIS
+    (berbeda dari Data 1 & Data 2 TPI) -- selalu kosong."""
+    return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # FUNGSI CLEANING
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -141,8 +161,10 @@ def clean_polis(val) -> str:
     if _POLIS_KEEP_AS_IS_RE.match(val):
         return val
 
-    # Hapus suffix "-NNN" atau "-NNN/NNN" berulang di akhir (mis. endorsement suffix)
-    p = val
+    # Hanya hapus suffix -EXT(angka) di bagian paling akhir.
+    p = re.sub(r"-EXT\(\d+\)$", "", val, flags=re.IGNORECASE)
+
+    # Hapus suffix "-NNN" atau "-NNN/NNN" berulang di akhir
     while True:
         stripped = re.sub(r"-\d+(?:/\d+)?$", "", p)
         if stripped == p:
@@ -276,26 +298,21 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     for pattern in [r"\bTBK\.?\b", r"\(PERSERO\)", r"\bPERSERO\b", r"\bLTD\.?\b"]:
         val = re.sub(pattern, "", val, flags=re.IGNORECASE)
 
-    # "-" TIDAK dijadikan pemisah lagi -- sebelumnya ini bug: nama perusahaan
-    # yang memang pakai strip (mis. "PERTA-SAMTAN GAS", "TRANS-PACIFIC
-    # PETROCHEMICAL INDOTAMA") ikut kepecah jadi 2. Strip dibiarkan menempel
-    # jadi bagian nama.
     split_pattern = r"\bQQ\b|/|,|\d+\.|\bPT\.?\b|\bCV\.?\b|:|;"
     parts = re.split(split_pattern, val, flags=re.IGNORECASE)
-    parts = _merge_digit_start_parts(parts)  # nama unit/armada digabung, bukan dipisah
+    parts = _merge_digit_start_parts(parts)
     parts = _merge_region_prefix_parts(parts)
 
     cleaned = []
     for p in parts:
         p = _normalize_insured_part(p)
         if _is_valid_insured_part(p):
-            cleaned.append(p.replace(".", "").upper())  # titik dihapus, CAPS LOCK
+            cleaned.append(p.replace(".", "").upper())
 
     if not cleaned:
         fallback = _normalize_insured_part(val).replace(".", "").upper()
         return [fallback] if fallback else []
 
-    # buang segmen yang cuma singkatan dari segmen sebelumnya
     final = []
     for name in cleaned:
         name = _strip_trailing_abbrev_word(name, final)
@@ -332,6 +349,21 @@ def process_data(input_file: str, output_file: str) -> None:
         print("\n[WARN] Tidak ada data setelah filter. Proses dihentikan.")
         return
 
+    if STATUS_COL not in df.columns:
+        print(f"\n[ERROR] Kolom '{STATUS_COL}' tidak ditemukan!")
+        print(f"        Kolom tersedia: {list(df.columns)}")
+        return
+
+    before_status = len(df)
+    df[STATUS_COL] = df[STATUS_COL].astype(str).str.strip()
+    df = df[df[STATUS_COL] == STATUS_KEEP_VALUE].copy()
+    print(f"[2b/5] Filter status '{STATUS_KEEP_VALUE}': {len(df):,} baris "
+          f"(dibuang {before_status - len(df):,} baris ADJUSTED).")
+
+    if df.empty:
+        print("\n[WARN] Tidak ada data setelah filter status. Proses dihentikan.")
+        return
+
     for col in [INSURED_COL, POLIS_COL, SLIP_COL]:
         if col not in df.columns:
             print(f"\n[ERROR] Kolom '{col}' tidak ditemukan di file!")
@@ -347,7 +379,7 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print("[3/5] Menjalankan proses cleaning ...")
 
-    polis_cln, slip_cln, all_insured_parts = [], [], []
+    polis_cln, slip_cln, all_certificate, all_insured_parts = [], [], [], []
     max_insured_parts = 1
 
     for _, row in df.iterrows():
@@ -357,6 +389,7 @@ def process_data(input_file: str, output_file: str) -> None:
 
         polis_cln.append(refine_with_known_pattern(clean_polis(p_ori), KNOWN_POLIS_PATTERNS))
         slip_cln.append(refine_with_known_pattern(clean_slip(s_ori), KNOWN_SLIP_PATTERNS))
+        all_certificate.append(extract_certificate(p_ori))
 
         parts = clean_insured(i_ori, p_ori, s_ori)
         max_insured_parts = max(max_insured_parts, len(parts))
@@ -364,27 +397,61 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print("[4/5] Menyusun kolom output ...")
 
-    df["POLIS_CLN"]   = polis_cln
-    df["SLIP_NO_CLN"] = slip_cln
+    df["POLIS_CLEAN_1"] = [
+        x if x not in (None, "") else None
+        for x in polis_cln
+    ]
+
+    df["CERTIFICATE_1"] = [
+        x if x not in (None, "") else None
+        for x in all_certificate
+    ]
+
+    df["SLIP_CLEAN_1"] = [
+        x if x not in (None, "") else None
+        for x in slip_cln
+    ]
 
     insured_cols = []
+
     for i in range(1, max_insured_parts + 1):
-        col_name = f"INSURED_{i}"
-        df[col_name] = [p[i - 1] if i - 1 < len(p) else None for p in all_insured_parts]
+        col_name = f"INSURED_CLEAN_{i}"
+
+        df[col_name] = [
+            p[i - 1] if i - 1 < len(p) else None
+            for p in all_insured_parts
+        ]
+
         insured_cols.append(col_name)
 
-    # Susun ulang urutan kolom: ..._ORI diikuti kolom cleaning-nya, gaya Wahana
     new_columns = []
+
+    cleaning_cols = {
+        "POLIS_CLEAN_1",
+        "CERTIFICATE_1",
+        "SLIP_CLEAN_1",
+        *insured_cols,
+    }
+
     for col in df.columns:
-        if col in ("POLIS_CLN", "SLIP_NO_CLN") or col in insured_cols:
+
+        # Jangan masukkan kolom cleaning secara otomatis.
+        # Kolom tersebut akan ditempatkan setelah kolom ORI masing-masing.
+        if col in cleaning_cols:
             continue
+
         new_columns.append(col)
-        if col == "INSURED_ORI":
-            new_columns += insured_cols
-        elif col == "POLIS_ORI":
-            new_columns.append("POLIS_CLN")
+
+        if col == "POLIS_ORI":
+            new_columns.append("POLIS_CLEAN_1")
+            new_columns.append("CERTIFICATE_1")
+
         elif col == "SLIP_NO_ORI":
-            new_columns.append("SLIP_NO_CLN")
+            new_columns.append("SLIP_CLEAN_1")
+
+        elif col == "INSURED_ORI":
+            new_columns.extend(insured_cols)
+
 
     df = df[new_columns]
 
