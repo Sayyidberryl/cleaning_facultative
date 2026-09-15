@@ -9,13 +9,14 @@ import pandas as pd
 # KONFIGURASI
 # ─────────────────────────────────────────────────────────────────────────────
 
-INPUT_FILE  = os.path.join("input", "3a. Database Suspense 170726.xlsx")
-OUTPUT_FILE = os.path.join("output", "Suspend_Clean_WAHANA.xlsx")
-SHEET_NAME  = "Detail Database"   # sheet yang berisi data mentah (row 1-2 kosong/judul, header di row 3)
+INPUT_FILE  = os.path.join("input", "3b. Database Suspense 150826.xlsx")
+OUTPUT_FILE = os.path.join("output", "rev_wahana_output_suspend.xlsx")
+SHEET_NAME  = "Sheet1"   # sheet yang berisi data mentah (row 1-2 kosong/judul, header di row 3)
 
 # Kolom "comp_name" di data ini bernama CEDANT SHRT NAME
 COMPNAME_FILTER_COL   = "CEDANT SHRT NAME"
 COMPNAME_FILTER_VALUE = "WAHANA T."
+
 
 # Business rule: kalau hasil breakdown (insured/polis/slip) > 5 bagian,
 # tidak usah dipecah per kolom -> digabung lagi jadi satu kolom.
@@ -105,6 +106,84 @@ def clean_polis(val) -> list:
 
     return _cap_breakdown(cleaned_parts)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# CLEAN Certificate
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clean_certificate(polis_ori):
+    """
+    Mengambil Certificate dari POLIS ORI.
+
+    RULE:
+    - Polis harus mempunyai "-"
+    - Satu suffix angka:
+        ...-000156 -> 000156
+        ...-00073  -> 000073
+        ...-0045   -> 000045
+    - Beberapa suffix:
+        ...-110-114-109 -> 000110 SD 000109
+        ...-00383-00045-00031 -> 000383 SD 000031
+    - Suffix > 6 digit -> blank
+    - Suffix bukan angka -> blank
+    - Polis tanpa "-" -> blank
+    """
+
+    if pd.isna(polis_ori):
+        return ""
+
+    polis = str(polis_ori).strip()
+
+    if not polis:
+        return ""
+
+    # ============================================================
+    # HARUS ADA DASH
+    # ============================================================
+
+    if "-" not in polis:
+        return ""
+
+    # Ambil bagian setelah dash pertama
+    parts = polis.split("-")
+
+    if len(parts) < 2:
+        return ""
+
+    suffixes = [p.strip() for p in parts[1:]]
+
+    # ============================================================
+    # SEMUA SUFFIX HARUS ANGKA
+    # ============================================================
+
+    if not all(re.fullmatch(r"\d+", x) for x in suffixes):
+        return ""
+
+    # ============================================================
+    # SINGLE Certificate
+    # ============================================================
+
+    if len(suffixes) == 1:
+
+        cert = suffixes[0]
+
+        # Maksimal 6 digit
+        if len(cert) > 6:
+            return ""
+
+        return cert.zfill(6)
+
+    # ============================================================
+    # RANGE Certificate
+    # ============================================================
+
+    first = suffixes[0]
+    last = suffixes[-1]
+
+    # Maksimal 6 digit
+    if len(first) > 6 or len(last) > 6:
+        return ""
+
+    return f"{first.zfill(6)} SD {last.zfill(6)}"
 
 def clean_slip(val) -> list:
     """Kembalikan nilai slip (tanpa titik), pecah kalau ada lebih dari satu (+)."""
@@ -237,6 +316,33 @@ def process_data(input_file: str, output_file: str) -> None:
     df = pd.read_excel(input_file, sheet_name=SHEET_NAME, header=2)
     print(f"      Total baris keseluruhan: {len(df):,}")
 
+        # ========================================================
+    # FILTER STATUS - HANYA SUSPENSE
+    # ADJUSTED DIBUANG PERMANEN DARI OUTPUT
+    # ========================================================
+
+    if "STATUS" not in df.columns:
+        print("\n[ERROR] Kolom 'STATUS' tidak ditemukan!")
+        print(f"       Kolom tersedia: {list(df.columns)}")
+        return
+
+    total_sebelum_status = len(df)
+
+    df = df[
+        df["STATUS"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .eq("SUSPENSE")
+    ].copy()
+
+    total_suspense = len(df)
+    total_adjusted = total_sebelum_status - total_suspense
+
+    print(f"      Data SUSPENSE : {total_suspense:,} baris")
+    print(f"      Data ADJUSTED : {total_adjusted:,} baris dibuang")
+
     if COMPNAME_FILTER_COL not in df.columns:
         print(f"\n[ERROR] Kolom '{COMPNAME_FILTER_COL}' tidak ditemukan!")
         print(f"        Kolom tersedia: {list(df.columns)}")
@@ -252,7 +358,10 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print("[3/5] Menjalankan proses cleaning hanya untuk baris WAHANA (baris lain dibiarkan apa adanya) ...")
 
-    all_clean_polis, all_clean_slip, all_clean_ins = [], [], []
+    all_clean_polis = []
+    all_clean_slip = []
+    all_clean_ins = []
+    all_certificates = []
     max_polis = max_slip = max_ins = 1
 
     for idx, (_, row) in enumerate(df.iterrows()):
@@ -265,8 +374,10 @@ def process_data(input_file: str, output_file: str) -> None:
             c_polis = clean_polis(p_ori)
             c_slip  = clean_slip(s_ori)
             c_ins   = clean_insured(i_ori, p_ori, s_ori)
+            c_certificate = clean_certificate(p_ori)
         else:
             c_polis, c_slip, c_ins = [], [], []
+            c_certificate = ""
 
         max_polis = max(max_polis, len(c_polis))
         max_slip  = max(max_slip,  len(c_slip))
@@ -275,6 +386,8 @@ def process_data(input_file: str, output_file: str) -> None:
         all_clean_polis.append(c_polis)
         all_clean_slip.append(c_slip)
         all_clean_ins.append(c_ins)
+
+        all_certificates.append(c_certificate)
 
     # Safety net: breakdown tidak boleh lebih dari MAX_BREAKDOWN kolom
     max_polis = min(max_polis, MAX_BREAKDOWN)
@@ -285,14 +398,53 @@ def process_data(input_file: str, output_file: str) -> None:
 
     # Sisipkan kolom clean langsung setelah kolom _ori-nya
     new_columns = []
+
     for col in df.columns:
+
         new_columns.append(col)
+
         if col == "polis_ori":
-            new_columns += _expand_clean_columns(df, all_clean_polis, "polis",   max_polis)
+            df["Certificate"] = all_certificates
+
+            clean_polis_columns = _expand_clean_columns(
+                df,
+                all_clean_polis,
+                "polis",
+                max_polis
+            )
+
+            # Urutan:
+            # polis_ori
+            # clean polis 1
+            # Certificate
+            # clean polis 2
+            # clean polis 3
+            # dst.
+
+            if clean_polis_columns:
+                new_columns.append(clean_polis_columns[0])
+                new_columns.append("Certificate")
+                new_columns += clean_polis_columns[1:]
+            else:
+                new_columns.append("Certificate")
+
         elif col == "slip_ori":
-            new_columns += _expand_clean_columns(df, all_clean_slip,  "slip",    max_slip)
+
+            new_columns += _expand_clean_columns(
+                df,
+                all_clean_slip,
+                "slip",
+                max_slip
+            )
+
         elif col == "insured_ori":
-            new_columns += _expand_clean_columns(df, all_clean_ins,   "insured", max_ins)
+
+            new_columns += _expand_clean_columns(
+                df,
+                all_clean_ins,
+                "insured",
+                max_ins
+            )
 
     df = df[new_columns]
 

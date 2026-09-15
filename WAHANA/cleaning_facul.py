@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 
-INPUT_FILE  = os.path.join("input", "1a. Transaksi Facul 01.01.23 - 17.07.26.xlsx")
+INPUT_FILE  = os.path.join("input", "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
 OUTPUT_FILE = os.path.join("output", "wahana_output_facul.xlsx")
 
 CEDANT_COL   = "COMP_NAME"
@@ -14,7 +14,7 @@ CEDANT_VALUE = "PT.ASURANSI WAHANA TATA"
 POLIS_COL   = "FAC_POLICY_NO"
 SLIP_COL    = "FAC_SLIP"
 INSURED_COL = "FAC_INSURED"
-BROKER_COL  = "COMP_NAME2"
+BROKER_COL  = "COMP_NAME.1"
 
 MAX_SPLIT_COLS = 5
 
@@ -479,6 +479,86 @@ def clean_slip(val) -> list:
             slips.append(s)
 
     return _cap_or_join(slips)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CLEAN CERTIFICATE
+# ─────────────────────────────────────────────────────────────────────────────
+
+def clean_certificate(polis_ori):
+    """
+    Mengambil CERTIFICATE langsung dari POLIS ORI.
+
+    RULE:
+    - Polis harus mempunyai "-"
+    - Satu suffix angka:
+        ...-000156 -> 000156
+        ...-00073  -> 000073
+        ...-0045   -> 000045
+
+    - Beberapa suffix:
+        ...-110-114-109
+        -> 000110 SD 000109
+
+    - Suffix > 6 digit -> blank
+    - Suffix bukan angka -> blank
+    - Polis tanpa "-" -> blank
+    """
+
+    if pd.isna(polis_ori):
+        return ""
+
+    polis = str(polis_ori).strip()
+
+    if not polis:
+        return ""
+
+    # ============================================================
+    # HARUS ADA DASH
+    # ============================================================
+
+    if "-" not in polis:
+        return ""
+
+    # Ambil bagian setelah dash pertama
+    parts = polis.split("-")
+
+    if len(parts) < 2:
+        return ""
+
+    suffixes = [p.strip() for p in parts[1:]]
+
+    # ============================================================
+    # SEMUA SUFFIX HARUS ANGKA
+    # ============================================================
+
+    if not all(re.fullmatch(r"\d+", x) for x in suffixes):
+        return ""
+
+    # ============================================================
+    # SINGLE CERTIFICATE
+    # ============================================================
+
+    if len(suffixes) == 1:
+
+        cert = suffixes[0]
+
+        if len(cert) > 6:
+            return ""
+
+        return cert.zfill(6)
+
+    # ============================================================
+    # RANGE CERTIFICATE
+    # ============================================================
+
+    first = suffixes[0]
+    last = suffixes[-1]
+
+    if len(first) > 6 or len(last) > 6:
+        return ""
+
+    return f"{first.zfill(6)} SD {last.zfill(6)}"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLEAN INSURED
 # ─────────────────────────────────────────────────────────────────────────────
@@ -580,18 +660,29 @@ def _insert_clean_columns(
 
 
 def _fast_read_excel(path: str, sheet_name=None, header: int = 0) -> pd.DataFrame:
-    """Baca file Excel besar lebih cepat lewat openpyxl read_only + iter_rows."""
+    """Baca file Excel besar lewat openpyxl dan tangani nama kolom duplikat."""
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet_name] if sheet_name else wb.worksheets[0]
     rows_iter = ws.iter_rows(values_only=True)
     for _ in range(header):
         next(rows_iter)
-    cols = next(rows_iter)
+    raw_cols = next(rows_iter)
+    
+    # Penanganan kolom duplikat (COMP_NAME kedua otomatis jadi COMP_NAME.1)
+    cols = []
+    counts = {}
+    for c in raw_cols:
+        if c in counts:
+            counts[c] += 1
+            cols.append(f"{c}.{counts[c]}")
+        else:
+            counts[c] = 0
+            cols.append(c)
+
     data = list(rows_iter)
     wb.close()
     return pd.DataFrame(data, columns=cols)
-
 
 def _fast_write_excel(df: pd.DataFrame, path: str) -> None:
     """Tulis DataFrame besar ke xlsx lebih cepat lewat openpyxl write_only mode."""
@@ -641,6 +732,18 @@ def process_data(input_file: str, output_file: str) -> None:
     df.rename(columns={POLIS_COL: "polis_ori", SLIP_COL: "slip_ori", INSURED_COL: "insured_ori"},
               inplace=True)
 
+    # ============================================================
+    # CERTIFICATE
+    # Diambil langsung dari polis_ori karena Data 1 Facul
+    # tidak memiliki CLSDT
+    # ============================================================
+    certificate_values = [
+        clean_certificate(x)
+        for x in df["polis_ori"]
+    ]
+
+    df["CERTIFICATE"] = certificate_values
+
     # Sisipkan kolom mitra_bisnis di sebelah kanan BROKER_COL
     insert_pos = list(df.columns).index(BROKER_COL) + 1 if BROKER_COL in df.columns else len(df.columns)
     df.insert(insert_pos, "BUSINESS PARTNERS", mitra_values)
@@ -686,7 +789,21 @@ def process_data(input_file: str, output_file: str) -> None:
     for col in df.columns:
         new_columns.append(col)
         if col == "polis_ori":
-            new_columns += _insert_clean_columns(df, all_clean_polis, "polis",   max_polis)
+            # Urutan:
+            # polis_ori
+            # CERTIFICATE
+            # clean polis 1
+            # clean polis 2
+            # dst.
+
+            new_columns.append("CERTIFICATE")
+
+            new_columns += _insert_clean_columns(
+                df,
+                all_clean_polis,
+                "polis",
+                max_polis
+            )
         elif col == "slip_ori":
             new_columns += _insert_clean_columns(df, all_clean_slip,  "slip",    max_slip)
         elif col == "insured_ori":
