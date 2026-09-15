@@ -10,9 +10,9 @@ print("SCRIPT BERJALAN")
 # KONFIGURASI
 # ─────────────────────────────────────────────────────────────────────────────
 
-INPUT_FILE  = os.path.join("input", "3a. Database Suspense 170726.xlsx")
-OUTPUT_FILE = os.path.join("output", "tokio_output_suspend.xlsx")
-SHEET_NAME  = "Detail Database"
+INPUT_FILE  = os.path.join("input", "3b. Database Suspense 150826.xlsx")
+OUTPUT_FILE = os.path.join("output", "rev_tokio_output_suspend.xlsx")
+SHEET_NAME  = 0
 
 # Business rule: kalau hasil breakdown (insured/polis/slip) > 5 bagian,
 # tidak usah dipecah per kolom -> digabung lagi jadi satu kolom.
@@ -52,7 +52,7 @@ _INSURED_JUNK_WORDS = frozenset({
 
 # Gelar / sapaan yang ikut dihapus dari nama insured
 _INSURED_TITLE_RE = re.compile(
-    r"\b(?:BAPAK|IBU|BPK|NY\.?|SDR\.?|SDRI\.?|MR\.?|MRS\.?|MS\.?)\b\s*",
+    r"\b(?:BAPAK|IBU|BPK|NY\.?|SDR\.?|SDRI\.?|TN\.?|MR\.?|MRS\.?|MS\.?)\b\s*",
     re.IGNORECASE,
 )
 
@@ -70,6 +70,7 @@ def _cap_breakdown(parts: list, sep: str = "; ") -> list:
     if len(parts) > MAX_BREAKDOWN:
         return [sep.join(parts)]
     return parts
+
 
 def clean_polis(val) -> list:
     """
@@ -99,16 +100,10 @@ def clean_polis(val) -> list:
     for p in raw_parts:
         cur = p.strip()
 
-        # Hapus suffix seperti:
-        # -000-01
-        # -000-02
-        # -001-03
+        # Hapus suffix
         cur = re.sub(r"-\d{3}-\d+$", "", cur)
-
-        # Hapus suffix -000-01, -000-02, dst.
         cur = re.sub(r"-000-\d+$", "", cur)
 
-        # Hapus suffix -01 atau -02/03 jika masih ada
         while True:
             stripped = re.sub(r"-\d+(?:/\d+)?$", "", cur)
             if stripped == cur:
@@ -125,6 +120,42 @@ def clean_polis(val) -> list:
 
     return _cap_breakdown(cleaned_parts)
 
+def clean_Certificate(polis_ori):
+    """
+    Mengambil Certificate dari POLIS ORI (Khusus Tokio Marine).
+    - Jika bernilai -000- atau -0 -> Dianggap BUKAN Sertifikat (Kembalikan BLANK "")
+    - Jika bernilai -006- -> Kembalikan "000006"
+    """
+    if pd.isna(polis_ori):
+        return ""
+
+    polis = str(polis_ori).strip().upper()
+
+    if not polis:
+        return ""
+
+    # Hapus data kotor / suspense
+    if re.search(r"\bSUSPENSE\b|\bENDORSEMENT\b", polis):
+        return ""
+
+    # 1. Handling Pola Tokio Marine: -XXX-YY
+    m_tokio = re.search(r"-(\d{3})-\d+$", polis)
+    if m_tokio:
+        val = m_tokio.group(1)
+        # Jika bernilai 000 / 0 -> Anggap BUKAN sertifikat (BLANK)
+        if int(val) == 0:
+            return ""
+        return val.zfill(6)
+
+    # 2. Handling Pola Single Dash Biasa (-006 / -000006)
+    m_single = re.search(r"-(\d{1,6})$", polis)
+    if m_single:
+        val = m_single.group(1)
+        if int(val) == 0:
+            return ""
+        return val.zfill(6)
+
+    return ""
 def clean_slip(val) -> list:
     """Kembalikan nilai slip (tanpa titik), pecah kalau ada lebih dari satu (+)."""
     if pd.isna(val):
@@ -166,17 +197,12 @@ def _normalize_insured_part(p: str) -> str:
     p = re.sub(r"\bKB\b", "", p, flags=re.IGNORECASE)
     p = re.sub(r"\bA\.?W\.?\b", "", p, flags=re.IGNORECASE)
     p = re.sub(r"\(\s*\)", "", p)
-    # Hapus tanda *)
     p = re.sub(r"\*\)", "", p)  
-    # Hapus semua tanda *
     p = p.replace("*", "")
-    
 
-    # Trim leading/trailing AND/OR
     p = re.sub(r"^(?:AND|OR)\b\s*", "", p, flags=re.IGNORECASE)
     p = re.sub(r"\s*\b(?:AND|OR)$", "", p, flags=re.IGNORECASE)
 
-    # Trim leading/trailing non-alphanumeric
     p = re.sub(r"^[^a-zA-Z0-9(]+", "", p)
     p = re.sub(r"[^a-zA-Z0-9)]+$", "", p)
 
@@ -217,22 +243,13 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     if not val:
         return []
 
-    # ============================================================
-    # EXCEPTION
-    # Dibiarkan apa adanya
-    # ============================================================
     if re.search(r"KSO\s+MCC19-KJK\s*\(MMP\s*PROJECT\)", val, re.IGNORECASE):
         return [re.sub(r"\s{2,}", " ", val).strip().upper()]
 
     val = _remove_polis_slip_from_text(val, polis_ori, slip_ori)
-
-    # Hapus tail info sebelum split
     val = _INSURED_TAIL_RE.sub("", val)
-
-    # Hapus isi dalam kurung
     val = re.sub(r"\([^)]*\)", "", val)
 
-    # Normalisasi
     val = re.sub(
         r"\b(?:AND|AN|OR)\s*/\s*(?:AND|OR)\b",
         ",",
@@ -251,7 +268,6 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     ]:
         val = re.sub(pattern, "", val, flags=re.IGNORECASE)
 
-    # Delimiter pemisah insured
     split_pattern = (
         r"\bQQ\b|/|,|&|\+"
         r"|-(?!\s*(?:19|20)\d{2}\b)"
@@ -263,18 +279,17 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     )
 
     parts = re.split(split_pattern, val, flags=re.IGNORECASE)
-
     cleaned = []
 
     for p in parts:
         p = _normalize_insured_part(p)
-
         if _is_valid_insured_part(p):
             cleaned.append(p.upper())
 
     return _cap_breakdown(cleaned)
 
-    # ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
 # COLUMN EXPANSION HELPER
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -284,14 +299,7 @@ def _expand_clean_columns(
     prefix: str,
     max_cols: int,
 ) -> list:
-    """
-    Tambahkan kolom clean_{prefix}_1 .. N langsung setelah kolom ori.
-    max_cols otomatis dibatasi MAX_BREAKDOWN karena _cap_breakdown()
-    sudah menggabungkan hasil > MAX_BREAKDOWN jadi 1 kolom.
-    Returns daftar nama kolom baru yang ditambahkan.
-    """
     added = []
-
     for i in range(1, max_cols + 1):
         col_name = f"clean {prefix} {i}"
         df[col_name] = [
@@ -299,7 +307,6 @@ def _expand_clean_columns(
             for lst in all_lists
         ]
         added.append(col_name)
-
     return added
 
 
@@ -312,6 +319,30 @@ def process_data(input_file: str, output_file: str) -> None:
     df = pd.read_excel(input_file, sheet_name=SHEET_NAME, header=2)
     print(f"      Total baris keseluruhan: {len(df):,}")
 
+    # ========================================================
+    # FILTER STATUS - HANYA SUSPENSE
+    # ADJUSTED DIBUANG PERMANEN
+    # ========================================================
+
+    if "STATUS" not in df.columns:
+        raise ValueError("Kolom STATUS tidak ditemukan di data.")
+
+    total_sebelum = len(df)
+
+    df = df[
+        df["STATUS"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .eq("SUSPENSE")
+    ].copy()
+
+    total_sesudah = len(df)
+    total_adjusted = total_sebelum - total_sesudah
+
+    print(f"      Data SUSPENSE : {total_sesudah:,} baris")
+    print(f"      Data ADJUSTED : {total_adjusted:,} baris dibuang")
     print(f"[2/5] Total baris yang akan diproses: {len(df):,}")
 
     # Rename kolom asli -> _ori
@@ -334,6 +365,7 @@ def process_data(input_file: str, output_file: str) -> None:
     all_clean_polis = []
     all_clean_slip = []
     all_clean_ins = []
+    all_Certificates = []  # <--- 1. TAMBAH PENAMPUNG Certificate
 
     max_polis = 1
     max_slip = 1
@@ -347,6 +379,7 @@ def process_data(input_file: str, output_file: str) -> None:
         c_polis = clean_polis(p_ori)
         c_slip = clean_slip(s_ori)
         c_ins = clean_insured(i_ori, p_ori, s_ori)
+        c_cert = clean_Certificate(p_ori)  # <--- 2. PANGGIL CLEAN_Certificate
 
         max_polis = max(max_polis, len(c_polis))
         max_slip = max(max_slip, len(c_slip))
@@ -355,6 +388,7 @@ def process_data(input_file: str, output_file: str) -> None:
         all_clean_polis.append(c_polis)
         all_clean_slip.append(c_slip)
         all_clean_ins.append(c_ins)
+        all_Certificates.append(c_cert)  # <--- 3. SIMPAN KE LIST
 
     # Safety net
     max_polis = min(max_polis, MAX_BREAKDOWN)
@@ -363,18 +397,37 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print("[4/5] Menyusun kolom output ...")
 
+    # <--- 4. MASUKKAN Certificate KE DATAFRAME
+    df["Certificate"] = all_Certificates
+
     new_columns = []
 
     for col in df.columns:
+        if col == "Certificate":
+            continue
+
         new_columns.append(col)
 
         if col == "polis_ori":
-            new_columns += _expand_clean_columns(
+            clean_polis_columns = _expand_clean_columns(
                 df,
                 all_clean_polis,
                 "polis",
                 max_polis,
             )
+
+            # POLIS ORI
+            new_columns.append(col)
+
+            # clean polis 1
+            if clean_polis_columns:
+                new_columns.append(clean_polis_columns[0])
+
+            # Certificate
+            new_columns.append("Certificate")
+
+            # clean polis 2, 3, dst.
+            new_columns += clean_polis_columns[1:]
 
         elif col == "slip_ori":
             new_columns += _expand_clean_columns(
@@ -406,10 +459,10 @@ def process_data(input_file: str, output_file: str) -> None:
     print(f"  File disimpan di    : {output_file}")
     print(f"{'=' * 55}")
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("MASUK MAIN")
     process_data(INPUT_FILE, OUTPUT_FILE)
-   

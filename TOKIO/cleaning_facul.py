@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 
-INPUT_FILE  = os.path.join("input", "1a. Transaksi Facul 01.01.23 - 17.07.26.xlsx")
+INPUT_FILE  = os.path.join("input", "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
 OUTPUT_FILE = os.path.join("output", "tokio_output_facul.xlsx")
 
 CEDANT_COL   = "COMP_NAME"
@@ -14,7 +14,7 @@ CEDANT_VALUE = "PT.ASURANSI TOKIO MARINE INDONESIA"
 POLIS_COL   = "FAC_POLICY_NO"
 SLIP_COL    = "FAC_SLIP"
 INSURED_COL = "FAC_INSURED"
-BROKER_COL  = "COMP_NAME2"
+BROKER_COL  = "COMP_NAME_1"
 
 MAX_SPLIT_COLS = 5
 
@@ -136,7 +136,6 @@ def _normalize_spaces(text: str) -> str:
 
 
 def _is_valid_polis_token(tok: str) -> bool:
-    """Token polis valid: ≥5 char, punya digit, bukan TBA (murni/suffix)."""
     tok = tok.strip()
     return (
         len(tok) >= 5
@@ -146,7 +145,6 @@ def _is_valid_polis_token(tok: str) -> bool:
 
 
 def _extract_polis_tokens(text: str) -> list:
-    """Ekstrak semua token nomor polis valid dari teks."""
     tokens = []
     for block in re.split(r"\s{2,}", text.strip()):
         for tok in re.split(r"\+|\s+", block.strip()):
@@ -157,20 +155,6 @@ def _extract_polis_tokens(text: str) -> list:
 
 
 def _expand_dash_chain(segment: str) -> list:
-    """
-    Pecah satu segmen berisi base polis + suffix-suffix pendek dipisah dash.
-
-    Contoh:
-      '010115001310-1311-1313'
-          → ['010115001310', '010115001311', '010115001313']
-      '010115001310-010115300373'
-          → ['010115001310', '010115300373']  (keduanya base)
-
-    Aturan:
-    - Token ≥8 digit → base baru.
-    - Token pendek (semua digit, len < len(base)) → suffix: ganti N digit terakhir base.
-    - Lainnya → tambahkan apa adanya jika valid.
-    """
     results = []
     current_base = None
 
@@ -198,7 +182,6 @@ def _expand_dash_chain(segment: str) -> list:
 
 
 def _is_valid_slip_token(tok: str) -> bool:
-    """Token slip valid: ≥7 char, punya digit, bukan tahun 4-digit."""
     tok = tok.strip()
     return (
         len(tok) >= 7
@@ -208,7 +191,6 @@ def _is_valid_slip_token(tok: str) -> bool:
 
 
 def _strip_slip_suffix(tok: str) -> str:
-    """Hapus suffix pendek numerik setelah dash (misal: -03, -000059)."""
     m = re.match(r"^(.+?)-(\d{1,6})$", tok)
     if m and len(m.group(1)) > len(m.group(2)):
         return m.group(1)
@@ -216,7 +198,6 @@ def _strip_slip_suffix(tok: str) -> str:
 
 
 def _extract_slip_tokens(text: str) -> list:
-    """Ekstrak semua token nomor slip valid dari teks."""
     results = []
     for block in re.split(r"\s{2,}", text.strip()):
         clean = _SLIP_NOISE_RE.sub(" ", block)
@@ -237,211 +218,303 @@ def _extract_slip_tokens(text: str) -> list:
 
 
 def _clean_insured_name(name: str) -> str:
-
     if pd.isna(name):
         return ""
-
     name = str(name).upper()
-
-    # hapus info polis/slip
     name = INSURED_POLIS_RE.sub("", name)
-
-    # hapus badan usaha dan gelar
     name = INSURED_REMOVE_RE.sub(" ", name)
-
-    # ganti karakter
     name = re.sub(r"[()]", " ", name)
     name = name.replace("/", " ")
     name = name.replace("-", " ")
-
-    # rapikan spasi
     name = _normalize_spaces(name)
-
     return name
 
 def split_insured(name):
-
     if pd.isna(name):
         return []
-
     name = str(name)
-
     parts = INSURED_SPLIT_RE.split(name)
-
     hasil = []
-
     for p in parts:
-
         p = _clean_insured_name(p)
-
-        if not p:
+        if not p or p in INSURED_JUNK_WORDS:
             continue
-
-        if p in INSURED_JUNK_WORDS:
-            continue
-
         hasil.append(p)
-
     return hasil
 
 
 def _cap_or_join(items: list) -> list:
-    """Jika jumlah item melebihi MAX_SPLIT_COLS, gabungkan dengan koma."""
     if len(items) > MAX_SPLIT_COLS:
         return [",".join(items)]
     return items
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# CLEAN POLIS  (facul memiliki tambahan: dot-suffix, ampersand, _expand_dash_chain)
-# ─────────────────────────────────────────────────────────────────────────────
+# ============================================================
+# NEW: CERTIFICATE EXTRACTION & FORMATTING HELPERS
+# ============================================================
+
+def format_cert_range(start_str, end_str):
+    """Format 6 digit padding & tentukan pakai koma atau SD"""
+    try:
+        start_int = int(start_str)
+        end_int = int(end_str)
+        
+        if end_int < start_int:
+            return f"{str(start_int).zfill(6)} SD {str(end_int).zfill(6)}"
+            
+        count = end_int - start_int + 1
+        
+        if count > 3:
+            return f"{str(start_int).zfill(6)} SD {str(end_int).zfill(6)}"
+        else:
+            return ", ".join(str(i).zfill(6) for i in range(start_int, end_int + 1))
+    except ValueError:
+        return ""
+
+def extract_cert(p):
+    """Mendeteksi dan menarik nilai sertifikat dari teks, mengembalikan (sisa_polis, cert)"""
+    cert = ""
+    
+    m_sd = re.search(r"(?:-|,)?(\d{1,6})_SD_(\d{1,6})\b", p, re.IGNORECASE)
+    if m_sd:
+        # Jadikan cert HANYA JIKA digit aslinya >= 3
+        if len(m_sd.group(1)) >= 3 or len(m_sd.group(2)) >= 3:
+            cert = format_cert_range(m_sd.group(1), m_sd.group(2))
+        p = p[:m_sd.start()] + p[m_sd.end():]
+        return p.strip(" -/,"), cert
+        
+    m_comma = re.search(r"(?:-|,)((?:\d{1,6},)+\d{1,6})\b", p)
+    if m_comma:
+        nums = re.findall(r"\d{1,6}", m_comma.group(1))
+        if any(len(n) >= 3 for n in nums):
+            cert = ", ".join(n.zfill(6) for n in nums)
+        p = p[:m_comma.start()] + p[m_comma.end():]
+        return p.strip(" -/,"), cert
+        
+    m_range = re.search(r"-(\d{1,6})-(\d{1,6})\b", p)
+    if m_range:
+        if len(m_range.group(1)) >= 3 or len(m_range.group(2)) >= 3:
+            cert = format_cert_range(m_range.group(1), m_range.group(2))
+        p = p[:m_range.start()] + p[m_range.end():]
+        return p.strip(" -/,"), cert
+        
+    m_single = re.search(r"([A-Z]\d{5,8}|\d{8,})(?:-|,)(\d{1,6})\b", p)
+    if m_single:
+        if len(m_single.group(2)) >= 3:
+            cert = m_single.group(2).zfill(6)
+        p = p[:m_single.start()] + m_single.group(1) + p[m_single.end():]
+        return p.strip(" -/,"), cert
+        
+    m_end = re.search(r"(?:-|,)(\d{1,6})$", p)
+    if m_end:
+        if len(m_end.group(1)) >= 3:
+            cert = m_end.group(1).zfill(6)
+        p = p[:m_end.start()]
+        return p.strip(" -/,"), cert
+
+    return p.strip(" -/,"), cert
 
 def clean_polis(val) -> list:
     if pd.isna(val):
         return []
+    
+
+    
 
     val = str(val).strip()
     if not val:
         return []
 
-    # exception
-    if POLIS_EXCEPTION_RE.search(val):
-        return [_normalize_spaces(val)]
-
-    if re.search(r"\d+TBA\d+", val, re.IGNORECASE):
-        return [_normalize_spaces(val)]
-
-    val = _normalize_spaces(val)
-    val_upper = val.upper()
-
-    # ===============================
-    # RULE 1
-    # Hapus suffix /01 /02 /03 dst
-    # Contoh:
-    # 022117004330/02 -> 022117004330
-    # ===============================
-    val = re.sub(r"/\d{1,3}$", "", val)
-
-    # ===============================
-    # RULE 2
-    # Jika hanya angka + titik
-    # hapus semua titik
-    # ===============================
-    if re.fullmatch(r"[0-9.]+", val):
-        return [val.replace(".", "")]
-
-    # ===============================
-    # RULE 3
-    # Jika hanya angka + strip
-    # hapus semua strip
-    # ===============================
-    if re.fullmatch(r"[0-9-]+", val):
-        return [val.replace("-", "")]
-
     # ============================================================
-    # RULE 4
-    # TOKIO POLICY
+    # TOKIO - COMMA REPETITION
     # ============================================================
 
-    # hapus VAR
+    m_comma_rep = re.fullmatch(
+        r"^(.*?)-(\d{2,7}(?:,\d{2,7})+)$",
+        val
+    )
+
+    if m_comma_rep:
+
+        base = m_comma_rep.group(1).strip()
+
+        suffixes = [
+            x.strip()
+            for x in m_comma_rep.group(2).split(",")
+        ]
+
+        hasil_repetition = [
+            {
+                "polis": f"{base}-{suffix}",
+                "cert": ""
+            }
+            for suffix in suffixes
+            if re.fullmatch(r"\d{2,7}", suffix)
+        ]
+
+        # > 5 → biarkan POLIS ORI apa adanya
+        if len(hasil_repetition) > MAX_SPLIT_COLS:
+            return [{
+                "polis": val,
+                "cert": ""
+            }]
+
+        return hasil_repetition
+
+    # ============================================================
+    # FIX SUPER CLEANER: HAPUS JUNK DAN LEM SPASI/TITIK/DASH
+    # ============================================================
     val = re.sub(r"\bVARIOUS\b", "", val, flags=re.IGNORECASE)
+    val = re.sub(r"\bVARIO\b", "", val, flags=re.IGNORECASE)
+    val = re.sub(r"\bVARI\b", "", val, flags=re.IGNORECASE)
     val = re.sub(r"\bVAR\b", "", val, flags=re.IGNORECASE)
-
-    # Pertahankan prefix Tokio pada Data 1 Facul.
-
+    
+    val = re.sub(r"\(\s*END\s*\)", "", val, flags=re.IGNORECASE)
+    val = re.sub(r"\bEND\b", "", val, flags=re.IGNORECASE)
+    
+    # Hapus P1, P2, P3, dll di AWAL kata sebelum memproses regex yang lain
+    val = re.sub(r"\b(?:P1|P2|P3|P73)\b", "", val, flags=re.IGNORECASE)
+    
+    # 1. FIX: Lem Spasi antara Prefix dan Base
+    val = re.sub(r"([A-Z]{3}/[A-Z]{3,4}/\d{2})\s+([A-Z]\d{4,8})", r"\1-\2", val)
+    
+    # 2. Lem S/D dan Koma Certificate
+    val = re.sub(r"(\d{1,6})\s+S/?D\s+(\d{1,6})", r"\1_SD_\2", val, flags=re.IGNORECASE)
+    val = re.sub(r"\s+-\s+(\d)", r"-\1", val)
+    val = re.sub(r",\s+(\d)", r",\1", val)
+    
+    # 3. FIX: Ubah pola titik repitisi menjadi '+' 
+    val = re.sub(r"(?<=\d{3})\.(?=\d{3,5}\b)", "+", val)
+    
+    # 4. Ubah spasi slash menjadi plus agar bisa di-split dengan aman
+    val = re.sub(r"\s+/\s*|\s*/\s+", " + ", val)
+    
+    # 5. FIX: Ubah pola dash/koma repitisi menjadi '+' (MENCEGAH REPETISI JADI CERTIFICATE)
+    while True:
+        new_val = re.sub(
+            r"([A-Z0-9\./-]{8,}(?:\+\d{2,7})*)\s*(?:-|,)\s*(\d{2,7})\b",
+            # Aturan: Kalau angkanya 6 digit (123456) atau diawali 00 (000001), itu Certificate, jadi jangan diubah jadi '+'
+            lambda m: m.group(0) if (m.group(2).startswith("00") or len(m.group(2))==6) else f"{m.group(1)}+{m.group(2)}",
+            val
+        )
+        if new_val == val:
+            break
+        val = new_val
+    
+    val = re.sub(r"[\s/]+$", "", val)
     val = _normalize_spaces(val)
 
-    # angka+angka dibiarkan apa adanya
-    if re.fullmatch(r"\d+\+\d+", val):
-        return [val]
-
-    if "+" in val:
-
-        hasil = []
-        base = None
-
-        for p in val.split("+"):
-
-            p = p.strip()
-
-            # nomor polis lengkap (simpan full prefix jika ada)
-            m = re.search(r"^(.*?)([A-Z]\d{6,8})$", p)
-
-            if m:
-                base = m.group(2)
-                full = m.group(1) + m.group(2)
-
-                if full not in hasil:
-                    hasil.append(full)
-
+    def finalize(chunks):
+        res = []
+        for chunk in chunks:
+            if not chunk.strip():
                 continue
+                
+            p_clean, c_clean = extract_cert(chunk)
+            
+            # Simulated Certificate extraction for -001, -002 patterns 
+            # if extract_cert failed to catch it
+            m_end_cert = re.search(r"-(\d{1,3})$", p_clean)
+            if m_end_cert and not c_clean:
+                # Cek jika angka di ujung itu seperti -001
+                if m_end_cert.group(1).startswith("00"):
+                     c_clean = m_end_cert.group(1).zfill(6)
+                     p_clean = p_clean[:m_end_cert.start()]
 
-            # suffix 3-4 digit
-            if base and re.fullmatch(r"\d{3,4}", p):
-
-                # Jika panjang suffix sama dengan digit terakhir base
-                if len(base[1:]) == 6 and len(p) == 4:
-                    polis = base[0] + p.zfill(6)
+            # Sapu bersih junk
+            p_clean = re.sub(r"/\d{1,3}$", "", p_clean)
+            p_clean = re.sub(r"[,-]\d{1,2}$", "", p_clean) 
+            
+            if re.fullmatch(r"[0-9.]+", p_clean):
+                p_clean = p_clean.replace(".", "")
+            elif re.fullmatch(r"[0-9-]+", p_clean):
+                p_clean = p_clean.replace("-", "")
+                
+            if p_clean:
+                # Jika certificate mengandung koma, pecah jadi beberapa kolom
+                if c_clean and "," in c_clean:
+                    for cert_item in c_clean.split(","):
+                        res.append({"polis": p_clean, "cert": cert_item.strip()})
                 else:
-                    polis = base[:-len(p)] + p
+                    res.append({"polis": p_clean, "cert": c_clean})
+        
+        if len(res) > MAX_SPLIT_COLS:
+            comb_p = ",".join(x["polis"] for x in res)
+            comb_c = ",".join(x["cert"] for x in res if x["cert"])
+            return [{"polis": comb_p, "cert": comb_c}]
+        return res
 
-                if polis not in hasil:
-                    hasil.append(polis)
+    if POLIS_EXCEPTION_RE.search(val) or re.search(r"\d+TBA\d+", val, re.IGNORECASE):
+        p, c = extract_cert(val)
+        return [{"polis": _normalize_spaces(p), "cert": c}]
 
-                continue
-
-            # pola random
-            if p:
-                hasil.append(p)
-
-        return _cap_or_join(hasil)
-    # ===============================
-    # HAPUS P1, P2, P3, P4, ...
-    # ===============================
-
-    val = re.sub(r"\bP\d+\b", "", val, flags=re.IGNORECASE)
-
-    # Rapikan tanda + yang tersisa
+    val = val.replace("&", "+")
     val = re.sub(r"\+\s*\+", "+", val)
     val = re.sub(r"^\s*\+\s*|\s*\+\s*$", "", val)
-
     val = _normalize_spaces(val)
 
-    # ===============================
-    # RULE 6
-    # Multi polis +
-    # ===============================
+    if re.fullmatch(r"\d+\+\d+", val):
+        return finalize([val])
+
     if "+" in val:
         hasil = []
-
+        base = None
+        prefix = "" 
         for p in val.split("+"):
             p = p.strip()
+            
+            m_full = re.search(r"^(.+?)([A-Z]\d{4,8})(.*)$", p)
+            m_base_only = re.search(r"^([A-Z]\d{4,8})(.*)$", p)
+            
+            if m_full and not m_base_only:
+                prefix = m_full.group(1)
+                base = m_full.group(2)
+                suffix = m_full.group(3)
+                if p not in hasil:
+                    hasil.append(p)
+                continue
+                
+            elif m_base_only:
+                new_base = m_base_only.group(1)
+                suffix = m_base_only.group(2)
+                base = new_base
+                if prefix:
+                    full = prefix + new_base + suffix
+                    if full not in hasil:
+                        hasil.append(full)
+                else:
+                    if p not in hasil:
+                        hasil.append(p)
+                continue
 
-            p = re.sub(r"/\d{1,3}$", "", p)
-
-            if re.fullmatch(r"[0-9.]+", p):
-                p = p.replace(".", "")
-
-            elif re.fullmatch(r"[0-9-]+", p):
-                p = p.replace("-", "")
+            if base and prefix and re.match(r"^\d+", p):
+                m_num = re.match(r"^(\d+)(.*)$", p)
+                num = m_num.group(1)
+                rest = m_num.group(2)
+                if len(num) >= len(base) - 1:
+                    code = base[0] + num[-(len(base)-1):]
+                else:
+                    code = base[:-len(num)] + num
+                polis = prefix + code + rest
+                if polis not in hasil:
+                    hasil.append(polis)
+                continue
 
             if p:
-                hasil.append(p)
+                if p not in hasil:
+                    hasil.append(p)
+        return finalize(hasil)
 
-        return _cap_or_join(hasil)
-
-    # Multi polis /
     if re.search(r"\s+/\s+", val):
-
         hasil = [p.strip() for p in re.split(r"\s+/\s+", val) if p.strip()]
+        return finalize(hasil)
 
-        return _cap_or_join(hasil)
+    if " " in val:
+        hasil = [p.strip() for p in val.split() if p.strip()]
+        return finalize(hasil)
 
-    # ===============================
-    # RULE 7
-    # Polis biasa
-    # ===============================
-    return [val]
+    return finalize([val])
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLEAN SLIP
 # ─────────────────────────────────────────────────────────────────────────────
@@ -449,248 +522,136 @@ def clean_polis(val) -> list:
 def clean_slip(val) -> list:
     if pd.isna(val):
         return []
-
     val = str(val).upper().strip()
-
-    # hapus semua titik
     val = val.replace(".", "")
-
     if not val:
         return []
-
     val = _normalize_spaces(val)
-
-    # ============================================================
-    # PENYELESAIAN SUSPENSE / HUTANG PIUTANG
-    # Dibiarkan apa adanya
-    # ============================================================
 
     if SLIP_EXCEPTION_RE.search(val):
         return [_normalize_spaces(val)]
 
-    # ==========================================
-    # Rule 1 : Multi slip
-    # Delimiter hanya ; + &
-    # Jangan pecah '/'
-    # ==========================================
-
-    # ============================================================
-    # BIARKAN APA ADANYA
-    # TMD/FPAR/10-F0022562+EQ/22563+PAR/22560+EQ/22561
-    # ============================================================
-
     if re.search(r"\b(EQ|PAR)/\d+", val, re.IGNORECASE):
         return [_normalize_spaces(val)]
-
-    # ============================================================
-    # BIARKAN APA ADANYA
-    # MDD/FCMI/09-F0024678&24680&24682&24683
-    # ============================================================
 
     if re.fullmatch(r"MDD/FCMI/\d{2}-F\d{7}(?:&\d{4,5})+", val, re.IGNORECASE):
         return [_normalize_spaces(val)]
 
-    # ============================================================
-    # Pengulangan slip
-    # MDD/FCMI/09-F0024678&24680&24682
-    # F0003319+2677
-    # ============================================================
-
-    # hapus END, END., END1, END.1
     val = re.sub(r"\bEND(?:\.?1)?\b", "", val, flags=re.IGNORECASE)
-
-    # ============================================================
-    # Pengulangan slip
-    # MDD/FCMI/09-F0024678&24680&24682
-    # F0003319+2677
-    # ============================================================
-
     val=re.sub(r"END\.1\.?","",val)
     if ";" in val:
         val=val.replace(";","+")
+        
     if re.search(r"[+&]", val):
-
         parts = [x.strip() for x in re.split(r"[+&]", val) if x.strip()]
-
         hasil = []
-
         base = None
-
+        prefix = ""
         for p in parts:
-
-            # abaikan angka pendek (001, 75, 48, dll)
             if re.fullmatch(r"\d{1,3}", p):
                 continue
-
-            # hapus suffix -00/-01/-02
             p = re.sub(r"-\d{2}$", "", p)
-            
-            # pengulangan angka
             if base and prefix and re.fullmatch(r"\d{4,5}", p):
-
                 code = base[:-len(p)] + p
-
                 hasil.append(prefix + code)
-
                 base = code
-
                 continue
-
             hasil.append(p)
-
-            # slip lengkap
             m = re.match(r"^(.*?)([A-Z]\d{7}|\d{5,8})$", p)
-
             if m:
                 prefix = m.group(1)
                 code = m.group(2)
-
                 base = code
-
                 hasil.append(prefix + code)
-            
                 continue
-
-
         return _cap_or_join(list(dict.fromkeys(hasil)))
 
     slips = []
-
     for s in re.split(r"\s*[;+&]\s*", val):
-
         s = s.strip()
-
         if not s:
             continue
-
-        # ==========================================
-        # Rule 2 : Hapus keterangan di belakang
-        # ==========================================
         s = re.sub(
-            r"\b("
-            r"USD|IDR|SGD|EUR|JPY|AUD|GBP|"
-            r"ORI|ORI\.|ORIGINAL|COPY|"
-            r"REALISASI|REALIZATION|"
-            r"CANCEL|CANCELLED|"
-            r"ENDT?|ENDORSEMENT|"
-            r"SA|P1|P2|P3|VAR|REVISI|REV"
-            r")\b.*$",
-            "",
-            s,
-            flags=re.IGNORECASE,
+            r"\b(USD|IDR|SGD|EUR|JPY|AUD|GBP|ORI|ORI\.|ORIGINAL|COPY|REALISASI|REALIZATION|CANCEL|CANCELLED|ENDT?|ENDORSEMENT|SA|P1|P2|P3|VAR|REVISI|REV)\b.*$",
+            "", s, flags=re.IGNORECASE
         )
-
-        # ==========================================
-        # Rule 3 : Rapikan spasi
-        # ==========================================
         s = _normalize_spaces(s)
-        # Hapus suffix -00, -01, -02, dst
         s = re.sub(r"-(\d{2})$", "", s)
-
-        # ==========================================
-        # Rule 4 : Hapus karakter di depan/belakang
-        # ==========================================
         s = s.strip("-_,.; ")
-
         if not s:
             continue
-
         if s not in slips:
             slips.append(s)
 
-    return _cap_or_join(slips)# ─────────────────────────────────────────────────────────────────────────────
+    return _cap_or_join(slips)
 
-# CLEAN INSURED
+# ─────────────────────────────────────────────────────────────────────────────
+# CLEAN INSURED & MITRA BISNIS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def clean_insured(val) -> list:
-
     if pd.isna(val):
         return []
-
     val = str(val).strip()
-
     if not val:
         return []
 
-    # Breakdown sesuai separator
     insureds = split_insured(val)
-
     cleaned = []
-
     for ins in insureds:
-
         ins = _normalize_spaces(ins)
-
-        if not ins:
+        if not ins or len(ins) <= 2 or ins.upper() in INSURED_JUNK_WORDS:
             continue
-
-        if len(ins) <= 2:
-            continue
-
-        if ins.upper() in INSURED_JUNK_WORDS:
-            continue
-
-        # huruf kapital
         ins = ins.upper()
-
         if ins not in cleaned:
             cleaned.append(ins)
 
-    # kalau tidak berhasil dibreakdown
     if not cleaned:
-
         fallback = _clean_insured_name(val)
-
         if fallback:
             cleaned.append(fallback.upper())
 
     return _cap_or_join(cleaned)
-# ─────────────────────────────────────────────────────────────────────────────
-# MITRA BISNIS
-# ─────────────────────────────────────────────────────────────────────────────
+
 
 def get_mitra_bisnis(comp_name2, comp_name) -> str:
-    """
-    Tentukan mitra_bisnis:
-    - COMP_NAME2 kosong / 'DIRECT' → gunakan COMP_NAME (cedant)
-    - Selain itu → gunakan COMP_NAME2 (broker)
-    """
     broker = "" if pd.isna(comp_name2) else str(comp_name2).strip()
     if not broker or broker.upper() == "DIRECT":
         return "" if pd.isna(comp_name) else str(comp_name).strip()
     return broker
 
-def clean_business_partners(val):
 
+def clean_business_partners(val):
     if pd.isna(val):
         return ""
-
     val = str(val).strip().upper()
+    val = re.sub(r"\bPT\.\s*", "PT ", val, flags=re.IGNORECASE)
+    return _normalize_spaces(val)
 
-    # PT. -> PT
-    val = re.sub(
-        r"\bPT\.\s*",
-        "PT ",
-        val,
-        flags=re.IGNORECASE
-    )
-
-    val = _normalize_spaces(val)
-
-    return val
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PROCESS DATA
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _insert_clean_columns(
-    df: pd.DataFrame,
-    all_lists: list,
-    prefix: str,
-    max_cols: int,
-) -> list:
-    """Buat kolom clean_{prefix}_N dan kembalikan nama-nama kolom baru."""
+def _insert_paired_columns(df: pd.DataFrame, all_clean_data: list, max_cols: int) -> list:
+    """Sisipkan kolom 'clean polis' dan maksimal 3 'Certificate' secara berdampingan."""
+    added = []
+    for i in range(1, max_cols + 1):
+        polis_col = f"clean polis {i}"
+        cert_col = f"Certificate {i}"
+        
+        df[polis_col] = [lst[i - 1]["polis"] if i - 1 < len(lst) else None for lst in all_clean_data]
+        added.append(polis_col)
+        
+        # RULE: HANYA BUAT KOLOM CERTIFICATE SAMPAI MAKSIMAL KE-3
+        if i <= 3:
+            df[cert_col] = [lst[i - 1]["cert"] if i - 1 < len(lst) else None for lst in all_clean_data]
+            added.append(cert_col)
+            
+    return added
+
+
+def _insert_clean_columns(df: pd.DataFrame, all_lists: list, prefix: str, max_cols: int) -> list:
     added = []
     for i in range(1, max_cols + 1):
         col_name = f"clean {prefix} {i}"
@@ -700,26 +661,35 @@ def _insert_clean_columns(
 
 
 def _fast_read_excel(path: str, sheet_name=None, header: int = 0) -> pd.DataFrame:
-    """Baca file Excel besar lebih cepat lewat openpyxl read_only + iter_rows."""
     import openpyxl
     wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     ws = wb[sheet_name] if sheet_name else wb.worksheets[0]
     rows_iter = ws.iter_rows(values_only=True)
     for _ in range(header):
         next(rows_iter)
-    cols = next(rows_iter)
+        
+    raw_cols = list(next(rows_iter))
+    
+    cols = []
+    seen = {}
+    for col in raw_cols:
+        col_str = str(col).strip() if col is not None else ""
+        if col_str in seen:
+            seen[col_str] += 1
+            cols.append(f"{col_str}_{seen[col_str]}")
+        else:
+            seen[col_str] = 0
+            cols.append(col_str)
+            
     data = list(rows_iter)
     wb.close()
     return pd.DataFrame(data, columns=cols)
 
 
 def _fast_write_excel(df: pd.DataFrame, path: str) -> None:
-    """Tulis DataFrame besar ke xlsx lebih cepat lewat openpyxl write_only mode."""
     import openpyxl
     os.makedirs(os.path.dirname(path), exist_ok=True)
-
     df2 = df.astype(object).where(pd.notnull(df), None)
-
     wb = openpyxl.Workbook(write_only=True)
     ws = wb.create_sheet("Sheet1")
     ws.append(list(df2.columns))
@@ -735,33 +705,29 @@ def process_data(input_file: str, output_file: str) -> None:
 
     if CEDANT_COL not in df.columns:
         print(f"\n[ERROR] Kolom '{CEDANT_COL}' tidak ditemukan!")
-        print(f"        Kolom tersedia: {list(df.columns)}")
         return
 
     required_cols = [POLIS_COL, SLIP_COL, INSURED_COL, BROKER_COL]
     for col in required_cols:
         if col not in df.columns:
             print(f"\n[ERROR] Kolom '{col}' tidak ditemukan di file!")
-            print(f"        Kolom tersedia: {list(df.columns)}")
             return
 
     df[CEDANT_COL] = df[CEDANT_COL].astype(str).str.strip()
     is_tokio = df[CEDANT_COL] == CEDANT_VALUE
-    print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {is_tokio.sum():,} baris WAHANA dari total {len(df):,} baris.")
+    print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {is_tokio.sum():,} baris TOKIO dari total {len(df):,} baris.")
 
-    # Hitung mitra_bisnis sebelum rename (butuh akses COMP_NAME & COMP_NAME2)
     broker_s = df[BROKER_COL].fillna("").astype(str).str.strip()
     cedant_s = df[CEDANT_COL].fillna("").astype(str).str.strip()
     use_cedant = (broker_s == "") | (broker_s.str.upper() == "DIRECT")
     mitra_values = [
-    clean_business_partners(x)
-    for x in np.where(use_cedant, cedant_s, broker_s)
-]
+        clean_business_partners(x)
+        for x in np.where(use_cedant, cedant_s, broker_s)
+    ]
 
     df.rename(columns={POLIS_COL: "polis_ori", SLIP_COL: "slip_ori", INSURED_COL: "insured_ori"},
               inplace=True)
 
-    # Sisipkan kolom mitra_bisnis di sebelah kanan BROKER_COL
     insert_pos = list(df.columns).index(BROKER_COL) + 1 if BROKER_COL in df.columns else len(df.columns)
     df.insert(insert_pos, "BUSINESS PARTNERS", mitra_values)
 
@@ -781,24 +747,21 @@ def process_data(input_file: str, output_file: str) -> None:
     total_w = len(tokio_idx)
     for n_done, pos in enumerate(tokio_idx, 1):
         if n_done % 5_000 == 0:
-            print(f"      Progress: {n_done:,} / {total_w:,} baris WAHANA diproses...")
+            print(f"      Progress: {n_done:,} / {total_w:,} baris TOKIO diproses...")
 
-        c_polis = clean_polis(polis_vals[pos])
+        c_polis_paired = clean_polis(polis_vals[pos])
         c_slip  = clean_slip(slip_vals[pos])
         c_ins   = clean_insured(insured_vals[pos])
 
-        max_polis = max(max_polis, len(c_polis))
+        max_polis = max(max_polis, len(c_polis_paired))
         max_slip  = max(max_slip,  len(c_slip))
         max_ins   = max(max_ins,   len(c_ins))
 
-        all_clean_polis[pos] = c_polis
+        all_clean_polis[pos] = c_polis_paired
         all_clean_slip[pos]  = c_slip
         all_clean_ins[pos]   = c_ins
 
     print(f"      Selesai diproses!")
-    print(f"      -> Jumlah kolom clean polis  : {max_polis}")
-    print(f"      -> Jumlah kolom clean slip   : {max_slip}")
-    print(f"      -> Jumlah kolom clean insured: {max_ins}")
 
     print("[4/5] Menyusun kolom output ...")
 
@@ -806,7 +769,7 @@ def process_data(input_file: str, output_file: str) -> None:
     for col in df.columns:
         new_columns.append(col)
         if col == "polis_ori":
-            new_columns += _insert_clean_columns(df, all_clean_polis, "polis",   max_polis)
+            new_columns += _insert_paired_columns(df, all_clean_polis, max_polis)
         elif col == "slip_ori":
             new_columns += _insert_clean_columns(df, all_clean_slip,  "slip",    max_slip)
         elif col == "insured_ori":
@@ -819,14 +782,7 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print(f"\n{'=' * 55}")
     print(f"  [OK] Selesai!")
-    print(f"  Total baris output  : {len(df):,}")
-    print(f"  Total kolom output  : {len(df.columns)}")
-    print(f"  File disimpan di    : {output_file}")
     print(f"{'=' * 55}")
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ENTRY POINT
-# ─────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     process_data(INPUT_FILE, OUTPUT_FILE)
