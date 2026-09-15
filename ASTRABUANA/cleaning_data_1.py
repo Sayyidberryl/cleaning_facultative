@@ -24,7 +24,7 @@ class Patterns:
         r"\b(?:PT\s+)?ASURANSI\s+ASTRA\s+BUANA\b|\bASTRA\s+BUANA\b", re.IGNORECASE
     )
     PLACEHOLDER_TOKENS = re.compile(r"\+?\s*\bP\d{1,3}\b\s*\+?", re.IGNORECASE)
-    SD = re.compile(r"\bS\s*/\s*D\b", re.IGNORECASE)
+    SD = re.compile(r"S\s*/\s*D", re.IGNORECASE)
     STRIP_LABEL_CLEAN = re.compile(r"^[\s/\-:,.+&;]+|[\s/\-:,.+&;]+$")
     TBA_VAR = re.compile(r"\b(TBA|VARIOUS|VAR)\b", re.IGNORECASE)
     NON_ALPHANUM = re.compile(r"[^A-Za-z0-9]")
@@ -32,6 +32,9 @@ class Patterns:
 
     # Regex khusus menghapus titik setelah PT (e.g., "PT." -> "PT")
     CLEAN_PT_DOT = re.compile(r"\bPT\s*\.\s*", re.IGNORECASE)
+
+    # Pola khusus ASTRA EX LS
+    ASTRA_EX_LS_PATTERN = re.compile(r"\bASTRA\s+EX\s+LS\b", re.IGNORECASE)
 
     # Policy Specific
     POLIS_VALID_FORMAT = re.compile(r"\d{11,}")
@@ -1086,11 +1089,56 @@ def _cek_awalan_pendek_polis(text: str):
     return None
 
 
+def _handle_pola_sd_tambahan(original_text: str, wajib_11_digit: bool) -> Optional[List[str]]:
+    text = original_text.strip()
+    
+    # Hapus awalan seperti "JUNE 2021 -", "AGUSTUS 2021/IDR -", dll
+    prefix_pattern = rf"^(?:{Patterns._BULAN_ALT}\s+\d{{4}}\s*[/\-]?\s*(?:IDR|USD|JPY|SGD|EUR|GBP)?\s*[/\-]?\s*)+"
+    text = re.sub(prefix_pattern, "", text, flags=re.IGNORECASE).strip()
+    
+    # Hapus juga awalan MONTH_YEAR_PREFIX standar jika masih ada sisa
+    text = Patterns.MONTH_YEAR_PREFIX.sub("", text).strip()
+    text = re.sub(r"\s*S\s*/\s*D\s*", " S/D ", text, flags=re.IGNORECASE).strip()
+    
+    if wajib_11_digit:
+        parts = text.split(" S/D ")
+        if len(parts) >= 2:
+            left_part = parts[0]
+            if len(left_part) >= 23:
+                rest = " S/D ".join(parts[1:])
+                return [left_part[:12].upper(), (left_part[12:] + " S/D " + rest).upper()]
+    else:
+        parts = text.split(" S/D ")
+        if len(parts) >= 2:
+            left_part = parts[0]
+            if len(left_part) >= 31:
+                rest = " S/D ".join(parts[1:])
+                return [left_part[:16].upper(), (left_part[16:] + " S/D " + rest).upper()]
+                
+    return [text.upper()]
+
+
 def _breakdown_polis_atau_slip_internal(value: Union[str, float], wajib_11_digit: bool) -> List:
     if pd.isna(value):
         return [value]
 
     original_text = str(value).strip()
+
+    # --- TAMBAHAN BARU: Bypass pembersihan jika slip mengandung ASTRA EX LS ---
+    if not wajib_11_digit and Patterns.ASTRA_EX_LS_PATTERN.search(original_text):
+        return [original_text]
+    # --------------------------------------------------------------------------
+
+    # Untuk slip: buang ekor catatan "/VARIOUS/<BULAN TAHUN>/<CCY>" (atau
+    # sebagian darinya) SEBELUM cek pola S/D, supaya "S" di akhir kata
+    # "VARIOUS" dan "D" di awal kata "DECEMBER" dst tidak salah kebaca
+    # sebagai penanda S/D.
+    if not wajib_11_digit:
+        original_text = Patterns.SLIP_TAIL_VARIOUS.sub("", original_text).strip()
+
+    if Patterns.SD.search(original_text):
+        return _handle_pola_sd_tambahan(original_text, wajib_11_digit)
+
     if (
         original_text == ""
         or original_text.startswith("*")
