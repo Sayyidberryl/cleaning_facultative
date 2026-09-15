@@ -1,0 +1,652 @@
+import os
+import re
+import numpy as np
+import pandas as pd
+
+print("SCRIPT BERJALAN")
+
+# ============================================================
+# KONFIGURASI ETIQA
+# ============================================================
+
+INPUT_FILE = os.path.join("input", "3b. Database Suspense 150826.xlsx")
+OUTPUT_FILE = os.path.join("output", "etiqa_output_suspend_filter.xlsx")
+SHEET_NAME = 0
+
+CEDANT_COL = "CEDANT NAME"
+CEDANT_VALUE = "PT. AS. ETIQA INT. IND.(EX. AS. ASOKA MAS)"
+
+MAX_BREAKDOWN = 5
+
+
+# ============================================================
+# INSURED RULE
+# ============================================================
+
+_INSURED_TAIL_RE = re.compile(
+    r"""
+      \bAS\b\s+(?:THE\s+)?(?:PRINCIPAL|OFF-TAKER|MAINTENANCE|CONTRACTOR).*
+    | \bBEING\s+(?:THE\s+)?(?:PRINCIPAL|OFF-TAKER).*
+    | \bAND\s+ALL\s+SUBSIDIARI.*
+    | \bINCLUDING\s+ALL\s+SUBSIDIARI.*
+    | \bINCLUDING\s+ANY\s+SUBSIDIAR.*
+    | \bINCLUDING\s+ANY\s+SUB\.?.*
+    | \bCOMPRISING\s+OF.*
+    | \bINSTALLMENT\b.*
+    | \bRELATED\s+COMPANY\b.*
+    | \bPURCHASED\s+OR\s+OTHERWISE\b.*
+    | \bWPC\s+DATE\s*:.* 
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
+_INSURED_JUNK_WORDS = frozenset({
+    "SHANGHAI", "PR OF CHINA", "CHINA", "INDONESIA", "JAKARTA",
+    "OFFICERS", "EMPLOYEES", "ALL OTHER CONTRACTORS",
+    "SUB-CONTRACTORS", "SUB CONTRACTORS",
+    "COMPANIES", "AFFILIATED", "AFFILIATES",
+    "CORPORATIONS AND INCLUDING PARTNERSHIP",
+    "JOINT VENTURES AND AGREEMENT OR BY LAW",
+    "AS THEIR RESPECTIVE INTEREST MAY APPEAR",
+    "AS THEIR RESPECTIVE INTERESTS MAY APPEAR",
+    "SUBSIDIARY", "SUBSIDIARIES", "ANY SUBSIDIARY COMPANY",
+    "RELATED COMPANY",
+    "FOR THEIRS RESPECTIVE RIGHTS AND INTEREST",
+    "MIGRASI AS400", "THE PRINCIPAL", "PRINCIPAL", "OWNER",
+})
+
+_INSURED_TITLE_RE = re.compile(
+    r"\b(?:BAPAK|IBU|BPK|NY\.?|SDR\.?|SDRI\.?|TN\.?|MR\.?|MRS\.?|MS\.?)\b\s*",
+    re.IGNORECASE,
+)
+
+
+# ============================================================
+# HELPER
+# ============================================================
+
+def _cap_breakdown(parts: list, sep: str = "; ") -> list:
+    parts = [p for p in parts if p]
+    if len(parts) > MAX_BREAKDOWN:
+        return [sep.join(parts)]
+    return parts
+
+
+# ============================================================
+# CLEAN POLIS
+# ============================================================
+
+def clean_polis(val) -> list:
+    """
+    Etiqa:
+    - 3010010924004217 -> 3010010924004217
+    - 3010010924004217-000239 -> 3010010924004217
+    - 3010010924004217-1/0 -> 3010010924004217
+    - separator . / - dibersihkan
+    """
+
+    if pd.isna(val):
+        return []
+
+    val = str(val).strip()
+
+    if not val or val == "-":
+        return []
+
+    val = val.replace(",", "")
+    raw_parts = [p.strip() for p in val.split("+") if p.strip()]
+    cleaned_parts = []
+
+    for p in raw_parts:
+        cur = p.strip()
+
+        # Hapus suffix fraksi seperti -1/0, -1/1, -11/6, dst.
+        cur = re.sub(r"-\d+(?:/\d+)?$", "", cur)
+
+        # Hapus separator polis
+        cur = cur.replace(".", "")
+        cur = cur.replace("/", "")
+        cur = cur.replace("-", "")
+
+        # Jangan masukkan token kosong
+        if cur:
+            cleaned_parts.append(cur)
+
+    return _cap_breakdown(cleaned_parts)
+
+
+# ============================================================
+# CLEAN CERTIFICATE
+# ============================================================
+
+def clean_certificate(polis_ori):
+    """
+    Certificate Etiqa diambil dari suffix numeric setelah dash.
+
+    Contoh:
+      3010010924004217-000239 -> 000239
+      3010010524002579-000920 -> 000920
+      3010010924004217-1/1   -> blank
+      3010010924004217       -> blank
+
+    Certificate hanya valid jika suffix numeric 1-6 digit.
+    """
+
+    if pd.isna(polis_ori):
+        return ""
+
+    polis = str(polis_ori).strip().upper()
+
+    if not polis or polis == "-":
+        return ""
+
+    # Data yang memang bukan certificate
+    if re.search(r"\bSUSPENSE\b|\bENDORSEMENT\b", polis):
+        return ""
+
+    # Jika berakhiran fraksi -1/1, -2/2, -11/6, dst.,
+    # fraksi bukan certificate.
+    if re.search(r"-\d+/\d+$", polis):
+        return ""
+
+    # Ambil suffix numeric setelah dash.
+    m = re.search(r"-(\d{1,6})$", polis)
+
+    if not m:
+        return ""
+
+    return m.group(1).zfill(6)
+
+
+# ============================================================
+# CLEAN SLIP
+# ============================================================
+
+def clean_slip(val) -> list:
+    """
+    Rule Etiqa:
+    - 3010010924004217 -> 3010010924004217
+    - 3010010924004217-28/9 -> 3010010924004217
+    - 1071031124000024-000251-1/0 -> 1071031124000024-000251
+    - CN/010/25/01/007263 -> CN0102501007263
+    - beberapa slip dengan + tetap dipisahkan
+    """
+
+    if pd.isna(val):
+        return []
+
+    val = str(val).strip()
+
+    if not val or val == "-":
+        return []
+
+    raw_parts = [p.strip() for p in val.split("+") if p.strip()]
+    cleaned_parts = []
+
+    for p in raw_parts:
+        p = p.strip()
+
+        # Hapus suffix fraksi paling belakang.
+        # Contoh:
+        # 3010010924004217-28/9 -> 3010010924004217
+        # 1071031124000024-000251-1/0 -> 1071031124000024-000251
+        p = re.sub(r"-.*$", "", p)
+        
+        # Hilangkan separator . dan /
+        p = p.replace(".", "")
+        p = p.replace("/", "")
+
+        # Untuk nomor slip Etiqa, dash yang tersisa adalah bagian
+        # nomor slip/pola nomor dan dipertahankan.
+        # Contoh 1071031124000024-000251 tetap seperti itu.
+        if p:
+            cleaned_parts.append(p)
+
+    return _cap_breakdown(cleaned_parts)
+
+
+# ============================================================
+# INSURED
+# ============================================================
+
+def _remove_polis_slip_from_text(text: str, polis_ori, slip_ori) -> str:
+    if pd.notna(polis_ori):
+        for token in [str(polis_ori).strip()] + clean_polis(polis_ori):
+            if token and token != "-":
+                text = text.replace(token, "")
+
+    if pd.notna(slip_ori):
+        for token in [str(slip_ori).strip()] + clean_slip(slip_ori):
+            if token and token != "-":
+                text = text.replace(token, "")
+
+    return text
+
+
+def _normalize_insured_part(p: str) -> str:
+    p = _INSURED_TAIL_RE.sub("", p)
+    p = _INSURED_TITLE_RE.sub("", p)
+
+    p = re.sub(r"\bKB\b", "", p, flags=re.IGNORECASE)
+    p = re.sub(r"\bA\.?W\.?\b", "", p, flags=re.IGNORECASE)
+
+    p = re.sub(r"\(\s*\)", "", p)
+    p = re.sub(r"\*\)", "", p)
+    p = p.replace("*", "")
+
+    p = re.sub(r"^(?:AND|OR)\b\s*", "", p, flags=re.IGNORECASE)
+    p = re.sub(r"\s*\b(?:AND|OR)$", "", p, flags=re.IGNORECASE)
+
+    p = re.sub(r"^[^a-zA-Z0-9(]+", "", p)
+    p = re.sub(r"[^a-zA-Z0-9)]+$", "", p)
+
+    return re.sub(r"\s+", " ", p).strip()
+
+
+def _is_valid_insured_part(p: str) -> bool:
+    if len(p) <= 2:
+        return False
+
+    up = p.upper()
+
+    if re.match(r"^[\d\/\-\.]+$", up):
+        return False
+
+    if re.search(
+        r"\b(?:NO\.\s*\d+|BUILDING|FLOOR|ROOM|ROAD|STREET|TOWER|KAV\.?|BLOK)\b",
+        up,
+    ):
+        return False
+
+    if re.search(
+        r"\b(?:PLTGU|PLTMH|PLTU|POWER PLANT|COMBINED CYCLE|MW|HYDRO ELECTRIC)\b",
+        up,
+    ):
+        return False
+
+    return up not in _INSURED_JUNK_WORDS
+
+
+def clean_insured(val, polis_ori, slip_ori) -> list:
+
+    if pd.isna(val):
+        return []
+
+    val = str(val).strip()
+
+    if not val:
+        return []
+
+    up = re.sub(r"\s+", " ", val).strip().upper()
+
+    # Hapus nomor polis/slip yang ikut masuk ke insured
+    val = _remove_polis_slip_from_text(up, polis_ori, slip_ori)
+
+    # Hapus bagian deskriptif
+    val = _INSURED_TAIL_RE.sub("", val)
+
+    # Hapus isi dalam kurung
+    val = re.sub(r"\([^)]*\)", "", val)
+
+    # Normalisasi pemisah AND/OR
+    val = re.sub(
+        r"\b(?:AND|AN|OR)\s*/\s*(?:AND|AN|OR)\b",
+        ",",
+        val,
+        flags=re.IGNORECASE,
+    )
+
+    val = re.sub(r"\bAND\s+OR\b", ",", val, flags=re.IGNORECASE)
+    val = re.sub(r"\bCO\.,?\s*LTD\.?\b", ",", val, flags=re.IGNORECASE)
+
+    # Hapus bentuk badan usaha tertentu
+    for pattern in [
+        r"\bTBK\.?\b",
+        r"\(PERSERO\)",
+        r"\bPERSERO\b",
+        r"\bLTD\.?\b",
+        r"\(FCI\.\s*I\.\)",
+    ]:
+        val = re.sub(pattern, "", val, flags=re.IGNORECASE)
+
+    # QQ adalah pemisah insured pada data Etiqa.
+    # PT. A QQ PT. B -> A ; B
+    split_pattern = (
+        r"\bQQ\b"
+        r"|/"
+        r"|,"
+        r"|&"
+        r"|\+"
+        r"|-(?!\s*(?:19|20)\d{2}\b)"
+        r"|\d+\."
+        r"|\bPT\.?\b"
+        r"|\bCV\.?\b"
+        r"|:"
+        r"|;"
+    )
+
+    parts = re.split(split_pattern, val, flags=re.IGNORECASE)
+
+    cleaned = []
+
+    for p in parts:
+        p = _normalize_insured_part(p)
+
+        if _is_valid_insured_part(p):
+            cleaned.append(p.upper())
+
+    # Hilangkan duplikat berurutan / duplikat persis
+    final = []
+    seen = set()
+
+    for item in cleaned:
+        if item not in seen:
+            final.append(item)
+            seen.add(item)
+
+    return _cap_breakdown(final)
+
+
+# ============================================================
+# COLUMN EXPANSION
+# ============================================================
+
+def _expand_clean_columns(
+    df: pd.DataFrame,
+    all_lists: list,
+    prefix: str,
+    max_cols: int,
+) -> list:
+
+    added = []
+
+    for i in range(1, max_cols + 1):
+        col_name = f"clean {prefix} {i}"
+
+        df[col_name] = [
+            lst[i - 1] if i - 1 < len(lst) else None
+            for lst in all_lists
+        ]
+
+        added.append(col_name)
+
+    return added
+
+
+# ============================================================
+# PROCESS DATA
+# ============================================================
+
+def process_data(input_file: str, output_file: str) -> None:
+
+    print(f"[1/6] Membaca data dari: {input_file} ...")
+
+    df = pd.read_excel(
+        input_file,
+        sheet_name=SHEET_NAME,
+        header=2,
+    )
+
+        # ========================================================
+    # FILTER STATUS - HANYA SUSPENSE
+    # ADJUSTED DIBUANG PERMANEN DARI OUTPUT
+    # ========================================================
+
+    if "STATUS" not in df.columns:
+        raise ValueError("Kolom STATUS tidak ditemukan di data.")
+
+    sebelum_status = len(df)
+
+    df = df[
+        df["STATUS"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .eq("SUSPENSE")
+    ].copy()
+
+    sesudah_status = len(df)
+
+    print(
+        f"[STATUS] Hanya SUSPENSE yang dipertahankan : "
+        f"{sesudah_status:,} baris"
+    )
+    print(
+        f"[STATUS] ADJUSTED yang dibuang             : "
+        f"{sebelum_status - sesudah_status:,} baris"
+    )
+
+    print(f"      Total baris keseluruhan : {len(df):,}")
+
+    required_cols = [
+        CEDANT_COL,
+        "INSURED",
+        "POLIS",
+        "SLIP NO",
+    ]
+
+    missing = [c for c in required_cols if c not in df.columns]
+
+    if missing:
+        raise ValueError(
+            f"Kolom wajib tidak ditemukan: {missing}"
+        )
+
+    # ========================================================
+    # FILTER CEDANT ETIQA
+    # ========================================================
+
+    cedant_series = (
+        df[CEDANT_COL]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    print(
+        f"[2/6] Data cedant "
+        f"'{CEDANT_VALUE}' : {len(df):,} baris"
+    )
+
+    # ========================================================
+    # RENAME ORIGINAL COLUMNS
+    # ========================================================
+
+    rename_map = {
+        "INSURED": "insured_ori",
+        "POLIS": "polis_ori",
+        "SLIP NO": "slip_ori",
+    }
+
+    df.rename(
+        columns={
+            k: v
+            for k, v in rename_map.items()
+            if k in df.columns
+        },
+        inplace=True,
+    )
+
+    print("[3/6] Menjalankan cleansing Etiqa ...")
+
+    all_clean_polis = []
+    all_clean_slip = []
+    all_clean_ins = []
+    all_certificates = []
+
+    max_polis = 1
+    max_slip = 1
+    max_ins = 1
+
+    for idx, row in df.iterrows():
+
+        p_ori = row.get("polis_ori", "")
+        s_ori = row.get("slip_ori", "")
+        i_ori = row.get("insured_ori", "")
+
+        if cedant_series.loc[idx] == CEDANT_VALUE:
+
+            c_polis = clean_polis(p_ori)
+            c_slip = clean_slip(s_ori)
+            c_ins = clean_insured(
+                i_ori,
+                p_ori,
+                s_ori,
+            )
+            c_certificate = clean_certificate(p_ori)
+
+        else:
+
+            c_polis = []
+            c_slip = []
+            c_ins = []
+            c_certificate = ""
+
+        max_polis = max(
+            max_polis,
+            len(c_polis),
+        )
+
+        max_slip = max(
+            max_slip,
+            len(c_slip),
+        )
+
+        max_ins = max(
+            max_ins,
+            len(c_ins),
+        )
+
+        all_clean_polis.append(c_polis)
+        all_clean_slip.append(c_slip)
+        all_clean_ins.append(c_ins)
+        all_certificates.append(c_certificate)
+
+    max_polis = min(max_polis, MAX_BREAKDOWN)
+    max_slip = min(max_slip, MAX_BREAKDOWN)
+    max_ins = min(max_ins, MAX_BREAKDOWN)
+
+    print(
+        f"      Maks breakdown polis   : {max_polis}"
+    )
+    print(
+        f"      Maks breakdown slip    : {max_slip}"
+    )
+    print(
+        f"      Maks breakdown insured : {max_ins}"
+    )
+
+    # ========================================================
+    # SUSUN OUTPUT
+    # ========================================================
+
+    print("[4/6] Menyusun kolom output ...")
+
+    df["CERTIFICATE"] = all_certificates
+
+    new_columns = []
+
+    for col in df.columns:
+
+        if col == "CERTIFICATE":
+            continue
+
+        if col == "polis_ori":
+
+            new_columns.append(col)
+
+            clean_polis_columns = _expand_clean_columns(
+                df,
+                all_clean_polis,
+                "polis",
+                max_polis,
+            )
+
+            if clean_polis_columns:
+
+                # Urutan:
+                # POLIS ORI
+                # clean polis 1
+                # CERTIFICATE
+                # clean polis 2
+                # clean polis 3 ...
+                new_columns.append(
+                    clean_polis_columns[0]
+                )
+
+                new_columns.append(
+                    "CERTIFICATE"
+                )
+
+                new_columns += (
+                    clean_polis_columns[1:]
+                )
+
+            else:
+                new_columns.append(
+                    "CERTIFICATE"
+                )
+
+        elif col == "slip_ori":
+
+            new_columns.append(col)
+
+            new_columns += _expand_clean_columns(
+                df,
+                all_clean_slip,
+                "slip",
+                max_slip,
+            )
+
+        elif col == "insured_ori":
+
+            new_columns.append(col)
+
+            new_columns += _expand_clean_columns(
+                df,
+                all_clean_ins,
+                "insured",
+                max_ins,
+            )
+
+        else:
+            new_columns.append(col)
+
+    df = df[new_columns]
+
+    # ========================================================
+    # SAVE
+    # ========================================================
+
+    print("[5/6] Menyimpan hasil ...")
+
+    os.makedirs(
+        os.path.dirname(output_file),
+        exist_ok=True,
+    )
+
+    df.to_excel(
+        output_file,
+        index=False,
+    )
+
+    print("[6/6] SELESAI")
+    print("=" * 65)
+    print(f"  Cedant       : {CEDANT_VALUE}")
+    print(f"  Total baris  : {len(df):,}")
+    print(f"  Total kolom  : {len(df.columns)}")
+    print(f"  Output       : {output_file}")
+    print("=" * 65)
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    print("MASUK MAIN")
+    process_data(
+        INPUT_FILE,
+        OUTPUT_FILE,
+    )
