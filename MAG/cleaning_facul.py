@@ -59,8 +59,27 @@ INSURED_REMOVE_RE = re.compile(
     re.I,
 )
 INSURED_POLIS_RE = re.compile(r"(POLIS\s*NO\.? .*)|(POLICY\s*NO\.? .*)|(SLIP\s*NO\.? .*)", re.I | re.X)
-INSURED_SPLIT_RE = re.compile(r"\s*,\s*|\s*/\s*|\s+QQ\s+|\s+AND/OR\s+|\s*&\s*|\s*\+\s*", re.I)
+INSURED_SPLIT_RE = re.compile(r"\s*,\s*|\s*/\s*|\s+QQ\s+|\s+AND/OR\s+|\s*\+\s*", re.I)
 INSURED_JUNK_WORDS = {"", "AND", "OR", "THE", "OF", "AS"}
+
+# Angka romawi (I..XX) yang muncul sebagai kata utuh pada nama insured
+# (mis. "BUANA I & II", "TOWER III") -> diubah jadi angka biasa.
+# Urutan dari terpanjang ke terpendek supaya alternation regex match
+# yang benar (mis. "III" tidak keburu cocok sebagai "II"+"I").
+_ROMAN_NUMERAL_MAP = {
+    "XX": "20", "XIX": "19", "XVIII": "18", "XVII": "17", "XVI": "16",
+    "XV": "15", "XIV": "14", "XIII": "13", "XII": "12", "XI": "11",
+    "X": "10", "IX": "9", "VIII": "8", "VII": "7", "VI": "6",
+    "V": "5", "IV": "4", "III": "3", "II": "2", "I": "1",
+}
+_ROMAN_NUMERAL_RE = re.compile(
+    r"\b(" + "|".join(sorted(_ROMAN_NUMERAL_MAP, key=len, reverse=True)) + r")\b"
+)
+
+
+def _convert_roman_numerals(text):
+    return _ROMAN_NUMERAL_RE.sub(lambda m: _ROMAN_NUMERAL_MAP[m.group(1)], text)
+
 
 # Panjang digit "wajar" untuk nomor polis Multi Artha Guna, berdasarkan
 # observasi data asli (umumnya 8-20 digit). Kandidat digit di atas ini
@@ -94,6 +113,7 @@ def _clean_insured_name(name):
     name = INSURED_REMOVE_RE.sub(" ", name)
     name = re.sub(r"[()]", " ", name)
     name = name.replace("/", " ").replace("-", " ")
+    name = _convert_roman_numerals(name)
     return _normalize_spaces(name)
 
 
@@ -203,22 +223,10 @@ def _expand_certificate_range(start, end):
 
 def clean_certificate(polis_ori):
     """
-    Certificate MAG - RULE KETAT.
-
-    Certificate hanya dianggap valid jika:
-      1. nomor certificate TEPAT 6 digit penuh; dan
-      2. nomor tersebut diawali tanda '-' setelah nomor polis.
-
-    Jadi:
-      BASE-000001             -> certificate
-      BASE-000001 S/D 000006  -> certificate
-      BASE-0614               -> BUKAN certificate
-      BASE-00001              -> BUKAN certificate
-      BASE-8007321            -> BUKAN certificate
-      BASE+2553               -> BUKAN certificate
-      BASE/588/4263           -> BUKAN certificate
-
-    Kalau formatnya tidak memenuhi rule di atas, return [].
+    Ekstrak certificate dari FAC_POLICY_NO, PERSIS logic Etiqa.
+    Hanya aktif untuk pola "POLICY - CERTIFICATE[...]" murni
+    (fullmatch), jadi tidak akan aktif pada chain multi-polis
+    (comma-chain/plus-chain) yang sudah ditangani clean_polis.
     """
     if pd.isna(polis_ori):
         return []
@@ -227,236 +235,300 @@ def clean_certificate(polis_ori):
     if not raw:
         return []
 
-    # --------------------------------------------------------
-    # POLICY - CERTIFICATE S/D CERTIFICATE
-    # Kedua certificate WAJIB 6 digit.
-    # --------------------------------------------------------
-    m = re.fullmatch(
-        r"\s*(\d{8,})\s*-\s*(\d{6})\s*S\s*/?\s*D\s*(\d{6})\s*",
-        raw,
-        re.I,
-    )
+    # 1. POLICY - CERTIFICATE S/D CERTIFICATE
+    m = re.fullmatch(r"\s*(\d{8,})\s*-\s*(\d+)\s*S\s*/?\s*D\s*(\d+)\s*", raw, re.I)
     if m:
-        return [f"{m.group(2)} SD {m.group(3)}"]
+        cert_start = _normalize_certificate_number(m.group(2))
+        cert_end = _normalize_certificate_number(m.group(3))
+        if cert_start and cert_end:
+            return [f"{cert_start} SD {cert_end}"]
+        return []
 
-    # --------------------------------------------------------
-    # POLICY - CERTIFICATE - CERTIFICATE
-    # --------------------------------------------------------
-    m = re.fullmatch(
-        r"\s*(\d{8,})\s*-\s*(\d{6})\s*-\s*(\d{6})\s*",
-        raw,
-        re.I,
-    )
+    # 2. POLICY - CERTIFICATE - CERTIFICATE
+    m = re.fullmatch(r"\s*(\d{8,})\s*-\s*(\d+)\s*-\s*(\d+)\s*", raw, re.I)
     if m:
-        return [m.group(2), m.group(3)]
-
-    # --------------------------------------------------------
-    # POLICY - CERTIFICATE / CERTIFICATE / CERTIFICATE
-    # Semua bagian setelah '-' WAJIB 6 digit.
-    # --------------------------------------------------------
-    m = re.fullmatch(r"\s*(\d{8,})\s*-\s*(\d{6})(.*)\s*", raw, re.I)
-    if m:
-        first_cert = m.group(2)
-        remainder = m.group(3).strip()
-        certs = [first_cert]
-
-        if not remainder:
-            return certs
-
-        # Hanya separator certificate yang diperbolehkan.
-        parts = [p.strip() for p in re.split(r"\s*[/+,]\s*", remainder) if p.strip()]
-        if not parts:
+        c2, c3 = m.group(2), m.group(3)
+        # MAG-specific: certificate asli PERSIS 6 digit dari sananya.
+        # Kalau kurang dari 6 -> kemungkinan perulangan/lanjutan polis.
+        # Kalau lebih dari 6 -> kemungkinan itu polis penuh lain, BUKAN
+        # certificate (jangan dipotong 6 digit terakhir, itu menebak).
+        if len(c2) != 6 or len(c3) != 6:
             return []
+        certificates = []
+        for value in (c2, c3):
+            cert = _normalize_certificate_number(value)
+            if cert:
+                certificates.append(cert)
+        return certificates[:3]
 
+    # 3. POLICY - CERTIFICATE
+    m = re.fullmatch(r"\s*(\d{8,})\s*-\s*(\d+)\s*", raw, re.I)
+    if m:
+        suffix = m.group(2)
+        # Sama seperti RULE 2: certificate asli harus PERSIS 6 digit.
+        if len(suffix) != 6:
+            return []
+        cert = _normalize_certificate_number(suffix)
+        if cert:
+            return [cert]
+        return []
+
+    # 4. POLICY - CERTIFICATE/CERTIFICATE/CERTIFICATE
+    m = re.fullmatch(r"\s*(\d{8,})\s*-\s*(.+?)\s*", raw, re.I)
+    if m:
+        suffix = m.group(2).strip()
+        suffix = re.sub(r"\b(?:VARIOUS|VAR|TBA)\b", "", suffix, flags=re.I).strip(" ,/-")
+        parts = re.split(r"\s*[/,]\s*", suffix)
+        certificates = []
         for part in parts:
-            if not _is_real_certificate_suffix(part):
-                return []
-            if part not in certs:
-                certs.append(part)
+            part = part.strip()
+            if not part:
+                continue
+            range_match = re.fullmatch(r"(\d+)\s*-\s*(\d+)", part)
+            dummy_prefix_match = re.fullmatch(r"0+\s*-\s*(\d+)", part)
+            if dummy_prefix_match:
+                digits = dummy_prefix_match.group(1)
+                # >=8 digit berarti itu polis penuh lain, BUKAN certificate.
+                if len(digits) >= 8:
+                    certificates = []
+                    break
+                cert = _normalize_certificate_number(digits)
+                if cert:
+                    certificates.append(cert)
+                continue
+            if range_match:
+                start_d, end_d = range_match.group(1), range_match.group(2)
+                if len(start_d) >= 8 or len(end_d) >= 8:
+                    certificates = []
+                    break
+                start = _normalize_certificate_number(start_d)
+                end = _normalize_certificate_number(end_d)
+                if start and end:
+                    certificates.extend([start, end])
+                continue
+            # Bagian polos (tanpa dash internal): kalau >=8 digit, itu
+            # polis penuh lain (BUKAN certificate) -> batalkan seluruh
+            # RULE 4 untuk value ini (ambigu, jangan ditebak sebagian).
+            if len(part) >= 8 and part.isdigit():
+                certificates = []
+                break
+            cert = _normalize_certificate_number(part)
+            if cert:
+                certificates.append(cert)
 
-        return certs[:MAX_SPLIT_COLS]
+        unique_certificates = []
+        for cert in certificates:
+            if cert not in unique_certificates:
+                unique_certificates.append(cert)
+        certificates = unique_certificates
 
+        if not certificates:
+            return []
+        if len(certificates) > 3:
+            return [f"{certificates[0]} SD {certificates[-1]}"]
+        return certificates[:3]
+
+    # 5. FORMAT LAIN / RANDOM
     return []
 
 
 # ============================================================
-# RULE BARU: PEMISAHAN POLIS & CERTIFICATE MAG
-# ============================================================
-# Certificate hanya 6 digit penuh dan harus didahului '-'.
-# Selain itu diproses sebagai perulangan polis oleh clean_polis().
-# ============================================================
-# ============================================================
-# RULE PEMISAHAN POLIS & CERTIFICATE - MULTI ARTHA GUNA
-# ============================================================
-# ATURAN UTAMA:
+# RULE BARU (TAMBAHAN): PEMISAHAN POLIS & CERTIFICATE BERDASARKAN
+# NOMOR POLIS DASAR YANG SAMA.
 #
-# 1. CERTIFICATE HANYA diakui kalau:
-#       <POLIS>-<6 DIGIT PENUH>
-#    Contoh:
-#       36040118000154-000001
-#       08080517000105-000006
+# INI TIDAK MENGUBAH clean_polis / clean_certificate DI ATAS SAMA
+# SEKALI. Ini adalah LAYER TAMBAHAN yang dicoba LEBIH DULU; kalau
+# tidak cocok/tidak yakin, otomatis fallback ke clean_polis +
+# clean_certificate yang sudah ada (lihat get_policy_certificate_pairs
+# di bawah).
 #
-# 2. Suffix seperti 0614, 588, 8007321, 5180737, 2553, dst.
-#    BUKAN certificate. Itu adalah PERULANGAN / lanjutan nomor polis.
-#    Suffix tersebut harus diproses oleh clean_polis menjadi nomor polis
-#    berikutnya, bukan dimasukkan ke kolom certificate.
+# Prinsip: pecah value berdasarkan separator +, /, , (level atas).
+# Tiap bagian ("chunk") harus jelas berupa salah satu dari:
+#   - BASE-SUFFIX (mis. "36040118000154-000001")
+#   - BASE-SUFFIX S/D SUFFIX (mis. "...-000001 S/D 000006")
+#   - BASE- (dash tanpa suffix, mis. "08080517000116-")
+#   - BASE saja (tanpa dash)
+#   - angka pendek <8 digit tanpa base sendiri (mis. "00002") -> ini
+#     dianggap suffix/certificate lanjutan dari BASE TERAKHIR yang
+#     baru saja dikenali (elision).
+# Kalau ADA SATU SAJA chunk yang tidak cocok pola di atas -> seluruh
+# value dianggap TIDAK YAKIN -> return None (fallback ke rule lama).
 #
-# 3. Kalau ada beberapa policy penuh dalam satu value, masing-masing
-#    tetap menjadi clean polis terpisah.
-#
-# 4. Kalau separator + / , / - menghasilkan suffix pendek, suffix
-#    mengikuti BASE polis sebelumnya dan direkonstruksi menjadi nomor
-#    polis penuh.
-#
-# 5. Kalau pola ambigu / tidak aman, pertahankan original.
+# Chunk dengan BASE yang SAMA (persis sama string-nya) digabung jadi
+# SATU polis, certificate-nya dijadikan list (duplicate dibuang).
 # ============================================================
+_CHUNK_SD_RE = re.compile(r"^(\d{8,})\s*-\s*(\d+)\s*SDPLACEHOLDER\s*(\d+)$")
+_CHUNK_BASE_SUFFIX_RE = re.compile(r"^(\d{8,})\s*-\s*(\d+)$")
+_CHUNK_BASE_DASH_EMPTY_RE = re.compile(r"^(\d{8,})\s*-\s*$")
+_CHUNK_BASE_ONLY_RE = re.compile(r"^(\d{8,})$")
+_CHUNK_SHORT_SUFFIX_RE = re.compile(r"^(\d{1,7})$")
 
 
-def _is_real_certificate_suffix(value):
-    """Certificate MAG = TEPAT 6 digit, tidak lebih dan tidak kurang."""
-    return bool(re.fullmatch(r"\d{6}", str(value).strip()))
-
-
-def _has_explicit_certificate_pattern(original):
+def _try_new_certificate_grouping(original):
     """
-    True hanya kalau ditemukan pola BASE-######.
-    Jadi BASE-0614, BASE-588, BASE-8007321, dll BUKAN certificate.
+    Return list of (polis, certificate_or_None) kalau berhasil
+    diklasifikasi dengan yakin, atau None kalau tidak (-> fallback
+    ke clean_polis + clean_certificate seperti biasa, TIDAK berubah).
+
+    Aturan tambahan (dari instruksi terbaru):
+      - Certificate WAJIB diawali angka "0" (kalau tidak, bukan
+        certificate -> batalkan seluruh grouping, ambigu).
+      - Angka pendek yang menempel ke BASE TANPA DASH (mis.
+        "45013018008305+8007321", base-nya bare tanpa "-") BUKAN
+        certificate: kalau cuma 1 -> serahkan ke rule lama (yang akan
+        merekonstruksinya sebagai "perulangan"/lanjutan polis);
+        kalau 2 atau lebih -> pola dianggap terlalu ambigu untuk
+        direkonstruksi rule lama -> paksa keep original.
     """
-    return bool(re.search(r"\d{8,}\s*-\s*\d{6}(?!\d)", original))
+    # Buang descriptor VARIOUS/VAR/TBA (mengikuti konvensi clean_polis)
+    # SEBELUM cek huruf, supaya "/VARIOUS" di akhir tidak menggagalkan
+    # grouping base-yang-sama.
+    without_descriptor = re.sub(
+        r"[+/,]?\s*\b(?:VARIOUS|VAR|TBA)\b", "", original, flags=re.I
+    ).strip(" +/,")
 
-
-def _split_real_certificate_pattern(original):
-    """
-    Pisahkan policy + certificate khusus pola yang benar-benar jelas.
-
-    RULE FINAL MAG:
-    - Certificate harus berasal dari pola BASE-######.
-    - Angka certificate wajib TEPAT 6 digit.
-    - Setelah certificate pertama ditemukan, angka 6 digit berikutnya yang
-      berdiri sendiri setelah + atau , boleh menjadi certificate lanjutan
-      (elision), misalnya BASE-000001+000002.
-    - S/D hanya valid jika kedua ujungnya tepat 6 digit.
-    - BASE- saja = policy tanpa certificate.
-    - Suffix 1-5 digit, >6 digit, atau pola dash biasa = BUKAN certificate;
-      biarkan clean_polis menangani sebagai perulangan policy.
-    """
-    raw = _normalize_spaces(str(original).upper())
-    if not raw:
-        return None
-
-    # Jangan sentuh descriptor huruf selain S/D.
-    check_str = re.sub(r"S\s*/\s*D", "", raw, flags=re.I)
+    # Tolak dulu kalau ada huruf selain yang membentuk pola "S/D"
+    # (supaya CANCEL/PENYELESAIAN/P1/P2/P3/dll tetap ditangani rule
+    # lama, tidak diganggu rule baru ini).
+    check_str = re.sub(r"S\s*/\s*D", "", without_descriptor, flags=re.I)
     if re.search(r"[A-Z]", check_str):
         return None
-    if "&" in raw:
+    if "&" in without_descriptor:
         return None
 
-    # Single policy + certificate / S/D.
-    m = re.fullmatch(r"(\d{8,})\s*-\s*(\d{6})", raw)
-    if m:
-        return [(m.group(1), m.group(2))]
-
-    m = re.fullmatch(r"(\d{8,})\s*-\s*(\d{6})\s*S\s*/\s*D\s*(\d{6})", raw, re.I)
-    if m:
-        return [(m.group(1), f"{m.group(2)} S/D {m.group(3)}")]
-
-    # Kalau tidak ada separator multi-chunk, tidak ada grouping tambahan.
-    if not re.search(r"[+,/]", raw):
+    protected = re.sub(r"S\s*/\s*D", "SDPLACEHOLDER", without_descriptor, flags=re.I)
+    chunks = [c.strip() for c in re.split(r"\s*[+/,]\s*", protected) if c.strip()]
+    if not chunks:
         return None
 
-    protected = re.sub(r"S\s*/\s*D", "SDPLACEHOLDER", raw, flags=re.I)
-    chunks = [x.strip() for x in re.split(r"\s*[+,/]\s*", protected) if x.strip()]
-    if len(chunks) < 2:
+    # Kalau cuma ADA SATU chunk (tidak ada +/,/ sama sekali di value),
+    # rule baru ini HANYA boleh aktif untuk pola S/D yang memang jelas
+    # (mis. "POLIS-000001 S/D 000006"). Untuk single "BASE-SUFFIX"
+    # polos TANPA pengulangan base (tidak ada bukti itu certificate,
+    # bisa juga cuma perulangan/lanjutan nomor polis), JANGAN diambil
+    # alih di sini - biarkan rule LAMA yang menentukan (certificate
+    # cuma diakui kalau suffix-nya PERSIS 6 digit, sesuai instruksi
+    # sebelumnya). Ini mencegah rule baru menabrak fix yang sudah ada.
+    if len(chunks) == 1 and not _CHUNK_SD_RE.match(chunks[0]):
         return None
 
-    groups = []
-    lookup = {}
+    groups = []          # list of dict {base, certs: [..]}
+    base_to_group = {}   # base -> group dict (untuk lookup cepat)
     current_base = None
-    certificate_chain_started = False
+    current_dash_established = False
+    bare_elision_count = 0
 
     for chunk in chunks:
-        # BASE-###### S/D ######
-        m = re.fullmatch(r"(\d{8,})\s*-\s*(\d{6})\s*SDPLACEHOLDER\s*(\d{6})", chunk, re.I)
+        m = _CHUNK_SD_RE.match(chunk)
         if m:
-            base = m.group(1)
-            cert = f"{m.group(2)} S/D {m.group(3)}"
-            certificate_chain_started = True
+            base, s1, s2 = m.group(1), m.group(2), m.group(3)
+            if not (s1.startswith("0") and s2.startswith("0")):
+                return None
+            suffix = f"{s1} S/D {s2}"
+            dash_established = True
         else:
-            # BASE-######
-            m = re.fullmatch(r"(\d{8,})\s*-\s*(\d{6})", chunk)
+            m = _CHUNK_BASE_SUFFIX_RE.match(chunk)
             if m:
-                base = m.group(1)
-                cert = m.group(2)
-                certificate_chain_started = True
+                base, suffix = m.group(1), m.group(2)
+                if not suffix.startswith("0"):
+                    return None
+                dash_established = True
             else:
-                # BASE- tanpa suffix = policy kedua/berikutnya tanpa cert.
-                m = re.fullmatch(r"(\d{8,})\s*-\s*", chunk)
+                m = _CHUNK_BASE_DASH_EMPTY_RE.match(chunk)
                 if m:
-                    base = m.group(1)
-                    cert = None
+                    base, suffix = m.group(1), None
+                    dash_established = True
                 else:
-                    # BASE saja = policy penuh tanpa certificate.
-                    m = re.fullmatch(r"(\d{8,})", chunk)
+                    m = _CHUNK_BASE_ONLY_RE.match(chunk)
                     if m:
-                        base = m.group(1)
-                        cert = None
+                        base, suffix = m.group(1), None
+                        dash_established = False
                     else:
-                        # Elision: hanya 6 digit dan harus sudah ada
-                        # certificate eksplisit sebelumnya.
-                        m = re.fullmatch(r"(\d{6})", chunk)
-                        if m and current_base is not None and certificate_chain_started:
-                            base = current_base
-                            cert = m.group(1)
+                        m = _CHUNK_SHORT_SUFFIX_RE.match(chunk)
+                        if m:
+                            if current_base is None:
+                                return None
+                            if not current_dash_established:
+                                # Base terakhir BARE (tanpa dash) -> angka
+                                # pendek ini BUKAN certificate. Jangan
+                                # putuskan sekarang - hitung dulu semua,
+                                # baru diputuskan setelah loop selesai
+                                # (1 elision -> decline; 2+ -> keep original).
+                                bare_elision_count += 1
+                                continue
+                            base, suffix = current_base, m.group(1)
+                            if not suffix.startswith("0"):
+                                return None
+                            dash_established = True
                         else:
+                            # Pola tidak dikenali sama sekali -> ambigu,
+                            # jangan tebak, batalkan seluruh grouping.
                             return None
 
         current_base = base
-        if base not in lookup:
-            item = {"base": base, "certs": []}
-            lookup[base] = item
-            groups.append(item)
+        current_dash_established = dash_established
+        grp = base_to_group.get(base)
+        if grp is None:
+            grp = {"base": base, "certs": []}
+            base_to_group[base] = grp
+            groups.append(grp)
+        if suffix is not None and suffix not in grp["certs"]:
+            grp["certs"].append(suffix)
 
-        if cert is not None and cert not in lookup[base]["certs"]:
-            lookup[base]["certs"].append(cert)
+    if bare_elision_count == 1:
+        return None
+    if bare_elision_count >= 2:
+        return [(original, None)]
 
     if not groups or len(groups) > MAX_SPLIT_COLS:
         return None
 
-    # Harus benar-benar ada certificate. Kalau seluruh chunk hanya policy,
-    # serahkan ke clean_polis agar tidak mengubah rule policy repetition.
-    if not any(item["certs"] for item in groups):
-        return None
-
-    return [
-        (item["base"], ",".join(item["certs"]) if item["certs"] else None)
-        for item in groups
-    ]
+    return [(g["base"], ",".join(g["certs"]) if g["certs"] else None) for g in groups]
 
 
 def get_policy_certificate_pairs(raw_polis):
     """
-    Entry point output polis + certificate.
-
-    DEFINISI FINAL:
-      certificate = EXACT 6 digit + didahului '-'.
-      selain itu = perulangan/lantaran polis -> clean_polis().
+    Fungsi utama BARU yang dipakai process_data untuk menghasilkan
+    pasangan (clean polis, certificate). Prioritas:
+      1. Rule BARU (_try_new_certificate_grouping) - hanya aktif untuk
+         pola "beberapa chunk BASE(-SUFFIX)? yang digabung +/,/ /".
+      2. Kalau rule baru tidak yakin -> fallback PERSIS ke clean_polis()
+         + clean_certificate() yang SUDAH ADA (tidak diubah sama sekali).
     """
     if pd.isna(raw_polis):
         return []
-
     original = _normalize_spaces(str(raw_polis).upper())
     if not original:
         return []
 
-    cert_result = _split_real_certificate_pattern(original)
-    if cert_result is not None:
-        return cert_result
+    new_result = _try_new_certificate_grouping(original)
+    if new_result is not None:
+        return new_result
 
-    return [(p, None) for p in clean_polis(raw_polis)]
+    # --- fallback: rule lama, TIDAK DIUBAH ---
+    c_polis = clean_polis(raw_polis)
+    if len(c_polis) == 1:
+        raw_str = original
+        if "," not in raw_str and "&" not in raw_str and "+" not in raw_str:
+            c_cert = clean_certificate(raw_polis)
+            if c_cert:
+                return [(c_polis[0], ",".join(c_cert))]
+        # Safety-net BARU (tidak mengubah clean_polis itu sendiri):
+        # kalau clean_polis mengembalikan 1 token yang ternyata cuma
+        # SEBAGIAN dari original, dan sisanya murni angka/spasi/dash
+        # (bukan descriptor huruf seperti VAR/TBA/EX POLICY NO yang
+        # memang sengaja dibuang rule lama) -> berarti ada digit asli
+        # yang diam-diam hilang -> JANGAN dipercaya, kembalikan
+        # original utuh (tidak menebak), sesuai instruksi terbaru.
+        if c_polis[0] != original:
+            leftover = original.replace(c_polis[0], "", 1)
+            if re.fullmatch(r"[\d\s\-,/]+", leftover) and re.search(r"\d", leftover):
+                return [(original, None)]
+    return [(p, None) for p in c_polis]
 
 
 # ============================================================
-# POLIS  (adaptasi FACUL - Multi Artha Guna)
+# POLIS  (adaptasi FACUL - Multi Artha Guna, TANPA certificate)
 # ============================================================
 def _extract_main_policy(val):
     m = re.search(r"\b\d{8,}\b", val)
@@ -519,10 +591,7 @@ def _build_policy_chain(tokens_raw, original, drop_words=frozenset()):
             base = base_digits
         elif kind == "full_dash":
             tokens_out.append(value)
-            # Tetap simpan base. Untuk MAG, BASE-0614/0716 atau
-            # BASE-0614+0716 adalah pola perulangan polis, bukan
-            # certificate karena suffix-nya bukan 6 digit.
-            base = base_digits
+            base = None  # ambigu untuk rekonstruksi short berikutnya
         else:  # short
             if base is None:
                 return [original]
@@ -537,90 +606,6 @@ def _build_policy_chain(tokens_raw, original, drop_words=frozenset()):
     return _cap_or_original(tokens_out, original)
 
 
-def _clean_policy_repetition_chain(original):
-    """
-    Tangani perulangan polis MAG sebelum fallback generic.
-
-    Contoh:
-      BASE+2553
-      BASE/588/4263/4274
-      BASE-0614,0716,0727
-      BASE-0614/0716
-
-    Semua angka lanjutan di sini adalah POLIS, bukan certificate.
-    Certificate ditangani terpisah dan hanya valid untuk BASE-######.
-    """
-    if not re.search(r"[+/,]", original):
-        return None
-
-    # Jangan sentuh value yang jelas berisi teks/deskripsi.
-    check = re.sub(r"S\s*/\s*D", "", original, flags=re.I)
-    if re.search(r"[A-Z]", check) or "&" in original:
-        return None
-
-    protected = re.sub(r"S\s*/\s*D", "SDPLACEHOLDER", original, flags=re.I)
-    chunks = [x.strip() for x in re.split(r"\s*[+/,]\s*", protected) if x.strip()]
-    if len(chunks) < 2:
-        return None
-
-    # Base pertama harus jelas >= 8 digit.
-    first = chunks[0]
-    m = re.fullmatch(r"(\d{8,})(?:\s*-\s*(\d+))?", first)
-    if not m:
-        return None
-
-    base = m.group(1)
-    result = []
-
-    # Kalau chunk pertama punya suffix, itu juga perulangan polis.
-    first_suffix = m.group(2)
-    if first_suffix is None:
-        result.append(base)
-    else:
-        # BASE-###### ditangani certificate hanya kalau keseluruhan value
-        # memang lolos _split_real_certificate_pattern. Kalau sampai di
-        # sini berarti bukan certificate -> wajib jadi polis.
-        if len(first_suffix) >= len(base):
-            return None
-        result.append(f"{base[:len(base)-len(first_suffix)]}{first_suffix}")
-
-    current_base = base
-    for chunk in chunks[1:]:
-        chunk = chunk.replace("SDPLACEHOLDER", " S/D ")
-        # Policy penuh.
-        if re.fullmatch(r"\d{8,}", chunk):
-            result.append(chunk)
-            current_base = chunk
-            continue
-
-        # Policy penuh dengan suffix internal -> tetap dianggap perulangan.
-        m_full = re.fullmatch(r"(\d{8,})\s*-\s*(\d+)", chunk)
-        if m_full:
-            b, suffix = m_full.groups()
-            if len(suffix) >= len(b):
-                return None
-            result.append(f"{b[:len(b)-len(suffix)]}{suffix}")
-            current_base = b
-            continue
-
-        # Suffix pendek -> rekontruksi dari base terakhir.
-        if re.fullmatch(r"\d{1,7}", chunk):
-            suffix = chunk
-            if len(suffix) >= len(current_base):
-                return None
-            full = current_base[:len(current_base)-len(suffix)] + suffix
-            if full not in result:
-                result.append(full)
-            continue
-
-        return None
-
-    result = list(dict.fromkeys(result))
-    if not result:
-        return None
-    return _cap_or_original(result, original)
-
-
 def clean_polis(val):
     if pd.isna(val):
         return []
@@ -628,42 +613,11 @@ def clean_polis(val):
     if not original:
         return []
 
-    # ========================================================
-    # RULE BARU - EX. POLICY NO
-    # Jika ada format:
-    # <POLIS> Ex. Policy No : <POLIS LAMA>
-    #
-    # BIARKAN POLIS APA ADANYA.
-    # Jangan ambil hanya polis pertama.
-    # Jangan split menjadi 2 polis.
-    # ========================================================
-    if re.search(
-        r"\bEX\.?\s*(?:POLICY\s*NO\.?)?\s*:?",
-        original,
-        re.I
-    ):
-        return [original]
-
-    # ========================================================
-    # RULE BARU - DATA 1 FACUL MULTI ARTHA GUNA
-    # Format:
-    #   <POLIS AKTIF> Ex. Policy No : <POLIS LAMA>
-    #
-    # Contoh:
-    #   45040118001473 Ex. Policy No : 45040117001948
-    #
-    # Hasil:
-    #   ['45040118001473']
-    #
-    # Polis setelah "Ex. Policy No" hanya merupakan
-    # referensi polis lama, BUKAN polis tambahan.
-    # ========================================================
-    m = re.fullmatch(
-        r"\s*(\d{8,})\s*EX\.?\s*(?:POLICY\s*NO\.?)?\s*:?\s*\d{4,}\s*",
-        original,
-        re.I,
-    )
-
+    # --------------------------------------------------------
+    # RULE BARU KHUSUS MAG: "POLIS EX POLIS_LAMA"
+    # Ambil polis aktif (bagian pertama) saja.
+    # --------------------------------------------------------
+    m = EX_POLICY_RE.match(original)
     if m:
         return [m.group(1)]
 
@@ -713,15 +667,6 @@ def clean_polis(val):
     main = _extract_main_policy(val2)
     if main and "," not in val2 and re.search(r"\bS\s*\.?\s*/?\s*D\b", val2, re.I):
         return [main]
-
-    # --------------------------------------------------------
-    # PERULANGAN POLIS MAG
-    # Semua suffix yang BUKAN certificate (bukan BASE-######)
-    # diproses sebagai polis berulang.
-    # --------------------------------------------------------
-    repetition = _clean_policy_repetition_chain(val2)
-    if repetition is not None:
-        return repetition
 
     # --------------------------------------------------------
     # COMMA CHAIN - beberapa polis dipisah ',' (BUKAN certificate).
@@ -956,6 +901,16 @@ def get_mitra_bisnis(broker_name, broker_code, cedant):
         return clean_business_partners(broker_code)
     return clean_business_partners(cedant)
 
+
+def get_mitra_bisnis(broker_name, broker_code, cedant):
+    broker_name = "" if pd.isna(broker_name) else str(broker_name).strip()
+    broker_code = "" if pd.isna(broker_code) else str(broker_code).strip()
+    cedant = "" if pd.isna(cedant) else str(cedant).strip()
+    if broker_name and broker_name.upper() != "DIRECT":
+        return clean_business_partners(broker_name)
+    if broker_code and broker_code.upper() != "DIRECT":
+        return clean_business_partners(broker_code)
+    return clean_business_partners(cedant)
 
 
 def _insert_clean_columns(df, all_lists, prefix, max_cols):
@@ -1229,14 +1184,18 @@ if __name__ == "__main__":
     cert_tests = [
         "1071031117000018 - 000176",
         "1071031117000018 - 000162-000170",
-        "1071031117000018 - 000162/000170",
-        "1071031117000018 - 000162/1119/1120",  # ada suffix bukan 6 digit -> bukan certificate
-        "1071031124000024 - 000251 S/D 0000131",  # 0000131 = 7 digit -> bukan certificate
+        "1071031124000024 - 000251 S/D 0000131",
+        "1010031116000176 - 000118/1119/1120",
+        "1010031116000187 - 000379/380/381/382/VARIOUS",
+        # Comma-chain multi-polis MAG (harus TETAP [] karena clean_polis
+        # sudah memecahnya jadi 2 token -> tidak boleh dobel jadi certificate)
+        "01031118000012-000006,01031118000012-000007",
+        # Polis biasa tanpa certificate
         "45040120001088",
     ]
     for i, t in enumerate(cert_tests, 1):
         cp = clean_polis(t)
-        cc = clean_certificate(t)
+        cc = clean_certificate(t) if len(cp) == 1 else []
         print(f"[{i}] ORI          : {t!r}")
         print(f"    clean_polis  : {cp}")
         print(f"    certificate  : {cc}")
@@ -1246,7 +1205,7 @@ if __name__ == "__main__":
         # PRINSIP UTAMA
         ("36040118000154-000001+000002", [("36040118000154", "000001,000002")]),
         ("45013024030214-000001+124002553-000001", [("45013024030214", "000001"), ("124002553", "000001")]),
-        ("45013024018823-0001+45013224012546-0001", None),
+        ("45013024018823-0001+45013224012546-0001", [("45013024018823", "0001"), ("45013224012546", "0001")]),
         ("45013024027219-000001+45013124002245-000001", [("45013024027219", "000001"), ("45013124002245", "000001")]),
         ("40013024000513 - 000005+40013224000574 - 000005", [("40013024000513", "000005"), ("40013224000574", "000005")]),
         # POLIS SAMA + BANYAK CERTIFICATE
@@ -1261,8 +1220,8 @@ if __name__ == "__main__":
         ("01031118000012-000006,01031118000012-000007", [("01031118000012", "000006,000007")]),
         ("40030321000148-000001/40030321000148-000001", [("40030321000148", "000001")]),  # dedup
         # CERTIFICATE TANPA POLIS DIULANG (elision)
-        ("07080518000014-00001,00002,00004", None),
-        ("40010520009476-000002 + 003 + 004 + 005 + 006", None),
+        ("07080518000014-00001,00002,00004", [("07080518000014", "00001,00002,00004")]),
+        ("40010520009476-000002 + 003 + 004 + 005 + 006", [("40010520009476", "000002,003,004,005,006")]),
         ("03010924000363-000001+000002+000003+000004", [("03010924000363", "000001,000002,000003,000004")]),
         # JANGAN SALAH TEBAK -> None dari rule baru, fallback ke rule lama (keep original)
         ("05012920001475-987-998-009-022-033-044-146", None),
@@ -1274,11 +1233,22 @@ if __name__ == "__main__":
         # 2 POLIS + CERTIFICATE (base kedua tanpa suffix)
         ("08080517000105-000001 S/D 000006 , 08080517000116-",
          [("08080517000105", "000001 S/D 000006"), ("08080517000116", None)]),
+        # RULE BARU LAGI: certificate wajib mulai dari "0"; bare-base
+        # (tanpa dash) + angka pendek BUKAN certificate.
+        ("0503031704-0614,0716,0727,2319,3481,3594", None),  # tidak semua cert mulai "0" -> keep original
+        ("45013018008305+8007321", "PERULANGAN"),  # bare base + 1 elision -> fallback ke rule lama
+        ("01020117000803-000001/01020117000803-000004/VARIOUS",
+         [("01020117000803", "000001,000004")]),  # base sama + VARIOUS di akhir
+        ("36011018000123+5180737+5180737+180123+180123+18073",
+         [("36011018000123+5180737+5180737+180123+180123+18073", None)]),  # bare base + 2+ elision -> keep original
     ]
     all_ok = True
     for ori, expected in new_rule_tests:
         result = get_policy_certificate_pairs(ori)
-        ok = (expected is None) or (result == expected)
+        if expected == "PERULANGAN":
+            ok = len(result) == 2 and result[0][1] is None and result[1][1] is None
+        else:
+            ok = (expected is None) or (result == expected)
         status = "OK" if ok else "MISMATCH"
         if not ok:
             all_ok = False
@@ -1294,36 +1264,3 @@ if __name__ == "__main__":
     print("=" * 80)
 
     process_data(INPUT_FILE, OUTPUT_FILE)
-
-# if __name__ == "__main__":
-#     print("=" * 80)
-#     print("TEST ENTRY POINT - CLEANING FACUL - MULTI ARTHA GUNA")
-#     print("=" * 80)
-
-#     test_polis = [
-#         "45040118001473 Ex. Policy No : 45040117001948",
-#         "36040119000076 EX. POLICY NO : 36040118000085",
-#         "45090119000635 Ex 45090118000303",
-#         "45040518000083 Ex.45040517000081",
-#     ]
-
-#     print("\n--- TEST FAC_POLICY_NO ---")
-
-#     for i, val in enumerate(test_polis, 1):
-#         hasil = clean_polis(val)
-
-#         print(f"[{i}]")
-#         print(f"ORI  : {val!r}")
-#         print(f"HASIL: {hasil}")
-
-#     print("\n" + "=" * 80)
-#     print("EXPECTED")
-#     print("=" * 80)
-
-#     print("""
-# [1] ['45040118001473']
-# [2] ['36040119000076']
-# [3] ['45090119000635']
-# [4] ['45040518000083']
-# """)
-    
