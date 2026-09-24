@@ -3578,7 +3578,7 @@ def process_data(
     )
 
     print(
-        "      Semua baris tetap dipertahankan."
+        "      Hanya baris cedant target yang dipertahankan."
     )
 
     if jumlah_etiqa == 0:
@@ -3594,6 +3594,19 @@ def process_data(
         print(
             "          Semua data tetap dipertahankan."
         )
+
+    # ========================================================
+    # BUANG SEMUA BARIS SELAIN CEDANT TARGET
+    # ========================================================
+
+    df = df[is_etiqa].reset_index(drop=True)
+    is_etiqa = pd.Series(True, index=df.index)
+    original_row_count = len(df)   # basis validasi = baris cedant target
+
+    print(
+        f"      Baris cedant lain dibuang: {jumlah_non_etiqa:,} "
+        f"| sisa: {len(df):,}"
+    )
 
     # ========================================================
     # RENAME KOLOM

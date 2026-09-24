@@ -555,9 +555,15 @@ def process_data(input_file: str, output_file: str) -> None:
         .str.strip()
     )
 
+    # Buang semua baris selain cedant Multi Artha Guna
+    total_sebelum_cedant = len(df)
+    df = df[cedant_series == CEDANT_VALUE].copy()
+    cedant_series = cedant_series.loc[df.index]
+
     print(
         f"[2/6] Data cedant "
-        f"'{CEDANT_VALUE}' : {len(df):,} baris"
+        f"'{CEDANT_VALUE}' : {len(df):,} baris "
+        f"({total_sebelum_cedant - len(df):,} baris cedant lain dibuang)"
     )
 
     # ========================================================

@@ -988,7 +988,15 @@ def process_data(input_file, output_file):
     total_target = int(is_target.sum())
     total_other = total_input_rows - total_target
     print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {total_target:,} baris target dari total {total_input_rows:,} baris "
-          f"({total_other:,} baris cedant lain, TIDAK diubah).")
+          f"({total_other:,} baris cedant lain).")
+
+    # Buang semua baris selain cedant target -> output hanya cedant target
+    df = df[is_target].reset_index(drop=True)
+    cedant_norm = cedant_norm[is_target].reset_index(drop=True)
+    is_target = pd.Series(True, index=df.index)
+    print(f"      Baris cedant lain dibuang: {total_other:,} | sisa: {len(df):,}")
+    total_input_rows = len(df)   # basis validasi = baris cedant target
+    total_other = 0
 
     broker_name_s = df[BROKER_NAME_COL].fillna("").astype(str).str.strip()
     broker_code_s = df[BROKER_CODE_COL].fillna("").astype(str).str.strip()
@@ -1001,7 +1009,7 @@ def process_data(input_file, output_file):
     insert_pos = list(df.columns).index(BROKER_NAME_COL) + 1 if BROKER_NAME_COL in df.columns else len(df.columns)
     df.insert(insert_pos, "BUSINESS PARTNERS", mitra_values)
 
-    print("[3/5] Menjalankan cleaning HANYA untuk baris target (baris lain dibiarkan apa adanya) ...")
+    print("[3/5] Menjalankan cleaning untuk baris cedant target ...")
     n = len(df)
     all_polis_cert_pairs = [[] for _ in range(n)]   # list of (polis, cert_or_None)
     all_clean_slip = [[] for _ in range(n)]
