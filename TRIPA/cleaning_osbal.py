@@ -1855,6 +1855,12 @@ def process_data(input_file: Path, output_file: Path) -> None:
         )
         return
 
+    # Buang semua baris selain cedant TRIPA -> output hanya TRIPA
+    total_lain = len(df) - int(is_tripa.sum())
+    df = df[is_tripa].reset_index(drop=True)
+    is_tripa = pd.Series(True, index=df.index)
+    print(f"      Baris cedant lain dibuang: {total_lain:,} | sisa: {len(df):,}")
+
     df.rename(
         columns={
             POLIS_COL: "polis_ori",

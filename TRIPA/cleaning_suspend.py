@@ -14,6 +14,11 @@ INPUT_FILE  = os.path.join("input", "3b. Database Suspense 150826.xlsx")
 OUTPUT_FILE = os.path.join("output", "rev_tripa_output_suspend.xlsx")
 SHEET_NAME  = 0
 
+# Filter cedant: hanya baris cedant ini yang dipertahankan.
+# Sesuaikan CEDANT_COL dengan nama kolom cedant di file Suspense.
+CEDANT_COL   = "CEDANT NAME"
+CEDANT_VALUE = "PT ASURANSI TRIPAKARTA"
+
 # Business rule: kalau hasil breakdown (insured/polis/slip) > 5 bagian,
 # tidak usah dipecah per kolom -> digabung lagi jadi satu kolom.
 MAX_BREAKDOWN = 5
@@ -431,6 +436,29 @@ def process_data(input_file: str, output_file: str) -> None:
     print(f"      Data SUSPENSE : {total_sesudah:,} baris")
     print(f"      Data ADJUSTED : {total_adjusted:,} baris dibuang")
 
+
+    # ========================================================
+    # FILTER CEDANT - HANYA TRIPA
+    # ========================================================
+    if CEDANT_COL not in df.columns:
+        raise ValueError(
+            f"Kolom '{CEDANT_COL}' tidak ditemukan. "
+            f"Kolom tersedia: {list(df.columns)}"
+        )
+
+    def _norm_cedant(x) -> str:
+        x = str(x).upper().replace(".", " ")
+        return re.sub(r"\s+", " ", x).strip()
+
+    total_sebelum_cedant = len(df)
+    df = df[
+        df[CEDANT_COL].fillna("").map(_norm_cedant).eq(_norm_cedant(CEDANT_VALUE))
+    ].copy()
+    print(
+        f"      Cedant '{CEDANT_VALUE}': {len(df):,} baris "
+        f"({total_sebelum_cedant - len(df):,} baris cedant lain dibuang)"
+    )
+
     print(f"[2/5] Total baris yang akan diproses: {len(df):,}")
 
     # Rename kolom asli -> _ori
@@ -446,8 +474,7 @@ def process_data(input_file: str, output_file: str) -> None:
     )
 
     print(
-        "[3/5] Menjalankan proses cleaning untuk rule TRIPA "
-        "(baris lain dibiarkan apa adanya) ..."
+        "[3/5] Menjalankan proses cleaning untuk rule TRIPA ..."
     )
 
     all_clean_polis = []

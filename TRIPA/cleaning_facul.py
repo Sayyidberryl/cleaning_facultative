@@ -863,6 +863,12 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print(f"\n[2/5] Filter cedant '{CEDANT_VALUE}': {total_tripa:,} baris TRIPA dari total {len(df):,} baris.")
 
+    # Buang semua baris selain cedant TRIPA -> output hanya TRIPA
+    total_lain = len(df) - total_tripa
+    df = df[is_tripa].reset_index(drop=True)
+    is_tripa = pd.Series(True, index=df.index)
+    print(f"      Baris cedant lain dibuang: {total_lain:,} | sisa: {len(df):,}")
+
     broker_name_s = df[BROKER_NAME_COL].fillna("").astype(str).str.strip()
     broker_code_s = df[BROKER_CODE_COL].fillna("").astype(str).str.strip()
     cedant_s = df[CEDANT_COL].fillna("").astype(str).str.strip()
