@@ -77,14 +77,48 @@ def _cap_breakdown(parts: list, sep: str = "; ") -> list:
     return parts
 
 
+def _strip_polis_suffix(cur: str) -> str:
+    """
+    Ambil nomor polis induk saja: buang suffix fraksi & certificate di belakang.
+
+    Contoh:
+    - 10703082400154-000001           -> 10703082400154
+    - 11112032500133-1/0              -> 11112032500133
+    - 11202012500246-000001-1/1       -> 11202012500246
+    - 10202012500292 000002 2/0       -> 10202012500292
+    - 10302012400168 000003 4/1       -> 10302012400168
+    - 10202012500292-000001 S/D 000005 -> 10202012500292
+    """
+    cur = cur.strip().upper()
+
+    # Buang suffix / VAR / VARIOUS / TBA
+    cur = re.sub(r"\s*/\s*(?:VAR|VARIOUS|TBA).*$", "", cur).strip()
+
+    # Range S/D -> ambil bagian kiri saja
+    cur = re.split(r"\s+S\s*/?\s*D\s+", cur, maxsplit=1)[0].strip()
+
+    # 1. Suffix fraksi di belakang (pemisah dash / spasi): -1/1, " 2/0", " 4/1"
+    cur = re.sub(r"[\s-]+\d+/\d+$", "", cur).strip()
+
+    # 2. Suffix certificate dengan dash: -000001, -01
+    cur = re.sub(r"-\d+$", "", cur).strip()
+
+    # 3. Suffix certificate dengan spasi: " 000002" (hanya jika didahului
+    #    nomor polis >= 10 digit, supaya nomor lain tidak ikut terpotong)
+    cur = re.sub(r"(?<=\d{10})\s+\d{1,6}$", "", cur).strip()
+
+    return cur
+
+
 def clean_polis(val) -> list:
     """
     Clean nomor polis TRIPA.
 
     Rule:
     - 10203082500560 -> tetap
-    - 10903082500101 -> tetap
     - 11112032500133-1/0 -> 11112032500133
+    - 11202012500246-000001-1/1 -> 11202012500246
+    - 10202012500292 000002 2/0 -> 10202012500292
     """
     if pd.isna(val):
         return []
@@ -98,20 +132,19 @@ def clean_polis(val) -> list:
     cleaned_parts = []
 
     for p in raw_parts:
-        cur = p.strip()
-
-        # Hapus suffix belakang seperti -000001, -1/0, -01/02, dst.
-        cur = re.sub(r"-\d+(?:/\d+)?$", "", cur)
+        cur = _strip_polis_suffix(p)
 
         # Hapus semua separator dari hasil clean.
         cur = cur.replace(".", "")
         cur = cur.replace("/", "")
         cur = cur.replace("-", "")
+        cur = cur.replace(" ", "")
 
         if cur:
             cleaned_parts.append(cur)
 
     return _cap_breakdown(cleaned_parts)
+
 
 def clean_Certificate(polis_ori):
     """
