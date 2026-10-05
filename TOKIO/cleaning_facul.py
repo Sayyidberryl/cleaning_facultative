@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 
 
-INPUT_FILE  = os.path.join("input", "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
-OUTPUT_FILE = os.path.join("output", "tokio_output_facul.xlsx")
+INPUT_FILE  = os.path.join("data_raw", "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
+OUTPUT_FILE = os.path.join("data_cleaned", "tokio_output_facul.xlsx")
 
 CEDANT_COL   = "COMP_NAME"
 CEDANT_VALUE = "PT.ASURANSI TOKIO MARINE INDONESIA"
@@ -17,6 +17,36 @@ INSURED_COL = "FAC_INSURED"
 BROKER_COL  = "COMP_NAME_1"
 
 MAX_SPLIT_COLS = 5
+
+# Header output facul (urutan & nama kolom final)
+OUTPUT_HEADERS = [
+    "FAC_CODE", "FAC_CEDANT", "COMP_NAME", "FAC_BROKER", "COMP_NAME.1",
+    "BUSINESS_PARTNERS",
+    "FAC_INSURED",
+    "FAC_INSURED_CLN_1", "FAC_INSURED_CLN_2", "FAC_INSURED_CLN_3",
+    "FAC_INSURED_CLN_4", "FAC_INSURED_CLN_5",
+    "FAC_POLICY_NO", "FAC_POLICY_CLEAN_1", "CERTIFICATE_1",
+    "FAC_POLICY_CLEAN_2", "FAC_POLICY_CLEAN_3",
+    "FAC_POLICY_CLEAN_4", "FAC_POLICY_CLEAN_5",
+    "FAC_SLIP",
+    "FAC_SLIP_CLEAN_1", "FAC_SLIP_CLEAN_2", "FAC_SLIP_CLEAN_3",
+    "FAC_SLIP_CLEAN_4", "FAC_SLIP_CLEAN_5",
+    "FAC_CURRENCY", "FAC_INP_DATE", "FAC_COM_DATE", "FAC_EXP_DATE",
+    "FAC_SUB_CLASS", "FAC_RISK", "FAC_DESC", "FAC_ACC_STS", "FAC_STS_SLIP",
+]
+
+# Nama internal -> nama header final
+_HEADER_RENAME = {
+    "polis_ori": "FAC_POLICY_NO",
+    "slip_ori": "FAC_SLIP",
+    "insured_ori": "FAC_INSURED",
+    "BUSINESS PARTNERS": "BUSINESS_PARTNERS",
+    BROKER_COL: "COMP_NAME.1",
+    **{f"clean polis {i}": f"FAC_POLICY_CLEAN_{i}" for i in range(1, 6)},
+    **{f"Certificate {i}": f"CERTIFICATE_{i}" for i in range(1, 4)},
+    **{f"clean slip {i}": f"FAC_SLIP_CLEAN_{i}" for i in range(1, 6)},
+    **{f"clean insured {i}": f"FAC_INSURED_CLN_{i}" for i in range(1, 6)},
+}
 
 # Polis: kata/prefix yang menyebabkan nilai dibiarkan apa adanya
 POLIS_EXCEPTION_RE = re.compile(
@@ -717,6 +747,12 @@ def process_data(input_file: str, output_file: str) -> None:
     is_tokio = df[CEDANT_COL] == CEDANT_VALUE
     print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {is_tokio.sum():,} baris TOKIO dari total {len(df):,} baris.")
 
+    # Buang semua baris selain cedant Tokio -> output hanya Tokio
+    total_awal = len(df)
+    df = df[is_tokio].reset_index(drop=True)
+    is_tokio = pd.Series(True, index=df.index)
+    print(f"      Baris non-Tokio dibuang: {total_awal - len(df):,} | sisa: {len(df):,}")
+
     broker_s = df[BROKER_COL].fillna("").astype(str).str.strip()
     cedant_s = df[CEDANT_COL].fillna("").astype(str).str.strip()
     use_cedant = (broker_s == "") | (broker_s.str.upper() == "DIRECT")
@@ -750,7 +786,13 @@ def process_data(input_file: str, output_file: str) -> None:
             print(f"      Progress: {n_done:,} / {total_w:,} baris TOKIO diproses...")
 
         c_polis_paired = clean_polis(polis_vals[pos])
+        for p_dict in c_polis_paired:
+            if p_dict.get("polis"):
+                p_dict["polis"] = _normalize_spaces(str(p_dict["polis"]).replace(".", "").replace("/", "").replace("-", ""))
+
         c_slip  = clean_slip(slip_vals[pos])
+        c_slip = [_normalize_spaces(str(s).replace(".", "").replace("/", "").replace("-", "")) for s in c_slip]
+
         c_ins   = clean_insured(insured_vals[pos])
 
         max_polis = max(max_polis, len(c_polis_paired))
@@ -769,13 +811,29 @@ def process_data(input_file: str, output_file: str) -> None:
     for col in df.columns:
         new_columns.append(col)
         if col == "polis_ori":
-            new_columns += _insert_paired_columns(df, all_clean_polis, max_polis)
+            new_columns += _insert_paired_columns(df, all_clean_polis, MAX_SPLIT_COLS)
         elif col == "slip_ori":
-            new_columns += _insert_clean_columns(df, all_clean_slip,  "slip",    max_slip)
+            new_columns += _insert_clean_columns(df, all_clean_slip,  "slip",    MAX_SPLIT_COLS)
         elif col == "insured_ori":
-            new_columns += _insert_clean_columns(df, all_clean_ins,   "insured", max_ins)
+            new_columns += _insert_clean_columns(df, all_clean_ins,   "insured", MAX_SPLIT_COLS)
 
     df = df[new_columns]
+
+    # Ganti nama kolom sesuai header final & urutkan
+    df = df.rename(columns=_HEADER_RENAME)
+
+    missing = [c for c in OUTPUT_HEADERS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Kolom berikut tidak ada di data: {missing}")
+
+    # CERTIFICATE_2 & CERTIFICATE_3 tidak dipakai -> dibuang dari output
+    df = df.drop(columns=["CERTIFICATE_2", "CERTIFICATE_3"], errors="ignore")
+
+    extra = [c for c in df.columns if c not in OUTPUT_HEADERS]
+    if extra:
+        print(f"      [INFO] Kolom di luar header yang ditentukan (ditaruh di paling kanan): {extra}")
+
+    df = df[OUTPUT_HEADERS + extra]
 
     print(f"[5/5] Menyimpan hasil ke: {output_file} ...")
     _fast_write_excel(df, output_file)

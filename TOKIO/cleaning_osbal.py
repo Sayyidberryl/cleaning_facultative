@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 
 
-INPUT_FILE = os.path.join("input", "2b. transaksi Osbal 01.01.23 - 17.08.26.xlsx")
-OUTPUT_FILE = os.path.join("output", "tokio_output_osbal.xlsx")
+INPUT_FILE = os.path.join("data_raw", "2b. transaksi Osbal 01.01.23 - 17.08.26.xlsx")
+OUTPUT_FILE = os.path.join("data_cleaned", "tokio_output_osbal.xlsx")
 
 CEDANT_COL   = "CCOS_COMP_NAME"
 CEDANT_VALUE = "PT.ASURANSI TOKIO MARINE INDONESIA"
@@ -15,7 +15,47 @@ POLIS_COL   = "FAC_POLICY_NO"
 SLIP_COL    = "FAC_SLIP"
 INSURED_COL = "FAC_INSURED"
 
+# CLSDT (data closing) = sumber UTAMA nomor polis / slip / sertifikat.
+# FAC_* hanya cadangan kalau CLSDT kosong / tidak valid.
+CLSDT_POLICY_COL = "CLSDT_POLICY_NO"
+CLSDT_SLIP_COL   = "CLSDT_SLIP_NO"
+
+CLSDT_INVALID_VALUES = frozenset({
+    "", "NAN", "NONE", "NULL", "NA", "N/A", "-", "TBA", "VAR", "VARIOUS",
+})
+
 MAX_SPLIT_COLS = 5
+
+# Header output osbal (urutan & nama kolom final)
+OUTPUT_HEADERS = [
+    "CCOS_DOC_NO", "CCOS_DATE", "CCOS_REF_CODE", "CCOS_COMP", "CCOS_COMP_NAME",
+    "CCOS_REF_COMP", "CCOS_REF_COMP_NAME",
+    "FAC_INSURED",
+    "FAC_INSURED_CLN_1", "FAC_INSURED_CLN_2", "FAC_INSURED_CLN_3",
+    "FAC_INSURED_CLN_4", "FAC_INSURED_CLN_5",
+    "CCOS_CURR", "CCOS_OR_BAL", "CCOS_BAL_DUE",
+    "CCOS_OR_BAL_IN_IDR", "CCOS_BAL_DUE_IN_IDR",
+    "FAC_COM_DATE", "FAC_EXP_DATE", "FAC_DUE_DATES", "FAC_SUB_CLASS",
+    "FAC_POLICY_NO", "FAC_POLICY_NO_CLEAN_1", "CERTIFICATE_1",
+    "FAC_POLICY_NO_CLEAN_2", "FAC_POLICY_NO_CLEAN_3",
+    "FAC_POLICY_NO_CLEAN_4", "FAC_POLICY_NO_CLEAN_5",
+    "FAC_SLIP",
+    "FAC_SLIP_CLEAN_1", "FAC_SLIP_CLEAN_2", "FAC_SLIP_CLEAN_3",
+    "FAC_SLIP_CLEAN_4", "FAC_SLIP_CLEAN_5",
+    "CLASS_CODE", "CLASS_NAME",
+    "CLSDT_POLICY_NO", "CLSDT_SLIP_NO", "CLSDT_SERTF_NO",
+]
+
+# Nama internal -> nama header final
+_HEADER_RENAME = {
+    "polis_ori": "FAC_POLICY_NO",
+    "slip_ori": "FAC_SLIP",
+    "insured_ori": "FAC_INSURED",
+    "CERTIFICATE": "CERTIFICATE_1",
+    **{f"clean polis {i}": f"FAC_POLICY_NO_CLEAN_{i}" for i in range(1, 6)},
+    **{f"clean slip {i}": f"FAC_SLIP_CLEAN_{i}" for i in range(1, 6)},
+    **{f"clean insured {i}": f"FAC_INSURED_CLN_{i}" for i in range(1, 6)},
+}
 
 # Polis: kata/prefix yang menyebabkan nilai dibiarkan apa adanya
 POLIS_EXCEPTION_RE = re.compile(
@@ -89,6 +129,12 @@ _SLIP_NOISE_RE = re.compile(
 )
 
 _SLIP_TOKEN_RE = re.compile(r"[A-Z0-9][A-Z0-9\-]{6,}", re.IGNORECASE)
+
+# "... + P2" (penanda periode) dibuang dari breakdown polis; "P1 CANCEL" tetap exception
+_PLUS_P_RE = re.compile(r"\s*\+\s*P\d+\b(?!\s*CANCEL)", re.IGNORECASE)
+
+# satu bagian breakdown polis: tanpa spasi, mengandung angka
+_PLUS_PART_RE = re.compile(r"[A-Z0-9./\-]*\d[A-Z0-9./\-]*")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,6 +211,7 @@ def clean_polis_raw(val) -> list:
     val = _normalize_spaces(val)
     val = val.replace(".", "")
     val = re.sub(r"-\d{3}-\d{2}$", "", val)
+    val = _normalize_spaces(_PLUS_P_RE.sub("", val))
 
     if POLIS_EXCEPTION_RE.search(val):
         return [_normalize_spaces(val)]
@@ -216,6 +263,7 @@ def clean_polis_raw(val) -> list:
         results = []
         tokio_prefix = None
         tokio_company = None
+        derived = set()   # index hasil yang berasal dari perulangan angka pendek
 
         for p in parts:
             m_company = re.match(r"^(TMD|TMI)/", p, flags=re.IGNORECASE)
@@ -271,6 +319,22 @@ def clean_polis_raw(val) -> list:
                 results.append(tokio_prefix + code if tokio_prefix else code)
                 continue
 
+            # Perulangan polis: angka pendek menimpa digit paling belakang
+            # dari polis lengkap terakhir (bukan hasil perulangan sebelumnya).
+            if re.fullmatch(r"\d{1,7}", p):
+                base = next(
+                    (results[i] for i in range(len(results) - 1, -1, -1)
+                     if i not in derived
+                     and re.search(r"[A-Z]\d{7,8}$", results[i])),
+                    None,
+                )
+                if base:
+                    tail_len = len(re.search(r"\d+$", base).group(0))
+                    if len(p) <= tail_len:
+                        results.append(base[:-len(p)] + p)
+                        derived.add(len(results) - 1)
+                        continue
+
             if p.upper() not in ["VAR", "VARIOUS", "TBA"]:
                 results.append(p.upper())
 
@@ -321,7 +385,7 @@ def clean_polis_raw(val) -> list:
         ]
 
     m = re.fullmatch(
-        r"((?:TMD|TMI)[A-Z]{4}\d{2})([A-Z]\d{7,8})((?:-\d{3,4})+)",
+        r"((?:TMD|TMI)[A-Z]{4}\d{2})([A-Z]\d{7,8})((?:-\d{3,7})+)",
         val,
         flags=re.IGNORECASE
     )
@@ -329,10 +393,11 @@ def clean_polis_raw(val) -> list:
         tokio_prefix = m.group(1).upper()
         first_code = m.group(2).upper()
         results = [tokio_prefix + first_code]
-        suffixes = re.findall(r"\d{3,4}", m.group(3))
+        suffixes = re.findall(r"\d{3,7}", m.group(3))
 
         for suffix in suffixes:
-            code_prefix = first_code[:-3] if len(suffix) == 3 else first_code[:-4]
+            # suffix menimpa digit paling belakang polis pertama
+            code_prefix = first_code[:-len(suffix)]
             results.append(tokio_prefix + code_prefix + suffix)
 
         return _cap_or_join(_unique(results))
@@ -370,11 +435,54 @@ def clean_polis_raw(val) -> list:
     return []
 
 
+def _polis_asis_if_many(val):
+    """
+    Breakdown '+' dengan lebih dari MAX_SPLIT_COLS (5) polis -> dibiarkan apa adanya
+    (tidak di-clean, tanda '+' tidak dibuang). Return None kalau tidak berlaku.
+    """
+    if pd.isna(val):
+        return None
+
+    s = _normalize_spaces(str(val).strip().upper())
+    s2 = _PLUS_P_RE.sub("", s.replace("&", "+"))
+    if "+" not in s2 or POLIS_EXCEPTION_RE.search(s2):
+        return None
+
+    parts = [p.strip() for p in s2.split("+") if p.strip()]
+    if len(parts) > MAX_SPLIT_COLS and all(_PLUS_PART_RE.fullmatch(p) for p in parts):
+        return s
+    return None
+
+
+def _polis_asis_if_many_dash(val):
+    """
+    Breakdown '-' (TMDFIAR21F0039255-688-312-...) dengan lebih dari 5 polis
+    -> dibiarkan apa adanya (tanda '-' tidak dibuang). Return None kalau tidak berlaku.
+    """
+    if pd.isna(val):
+        return None
+
+    s = _normalize_spaces(str(val).strip().upper())
+    m = re.fullmatch(
+        r"(?:TMD|TMI)[A-Z]{4}\d{2}[A-Z]\d{7,8}((?:-\d+)+)",
+        s.replace(".", "").replace("/", ""),
+    )
+    if m and 1 + len(re.findall(r"-\d+", m.group(1))) > MAX_SPLIT_COLS:
+        return s
+    return None
+
+
 def clean_polis(val) -> list:
     if pd.notna(val):
         val_str = str(val).strip().upper()
         if re.fullmatch(r"TMD\.FIAR\.22\.F\d{7,8}(?:\+\d{3})+", val_str):
             return [val_str.replace(".", "")]
+
+    asis = _polis_asis_if_many(val)
+    if asis is None:
+        asis = _polis_asis_if_many_dash(val)
+    if asis is not None:
+        return [asis]
 
     hasil = clean_polis_raw(val)
     hasil_clean = []
@@ -602,11 +710,53 @@ def clean_insured(val) -> list:
 # CLEAN CERTIFICATE
 # ─────────────────────────────────────────────────────────────────────────────
 
-def clean_certificate(polis_ori) -> str:
+def _is_valid_clsdt(val) -> bool:
+    """CLSDT dianggap valid kalau tidak NaN/blank/TBA/VAR/VARIOUS."""
+    if val is None or pd.isna(val):
+        return False
+    return str(val).strip().upper() not in CLSDT_INVALID_VALUES
+
+
+def clean_polis_clsdt(clsdt_val, fac_val) -> tuple:
     """
-    Pada Data 2 Osbal Tokio, tidak ada nomor sertifikat (Certificate di-BLANK-kan).
+    Prioritas CLSDT_POLICY_NO; kalau tidak valid (atau hasil cleaning kosong)
+    fallback ke FAC_POLICY_NO. Return (list clean polis, sumber).
     """
-    return ""
+    if _is_valid_clsdt(clsdt_val):
+        hasil = clean_polis(clsdt_val)
+        if hasil:
+            return hasil, "CLSDT"
+    return clean_polis(fac_val), "FAC"
+
+
+def clean_slip_clsdt(clsdt_val, fac_val) -> tuple:
+    """
+    Prioritas CLSDT_SLIP_NO; kalau tidak valid (atau hasil cleaning kosong)
+    fallback ke FAC_SLIP. Return (list clean slip, sumber).
+    """
+    if _is_valid_clsdt(clsdt_val):
+        hasil = clean_slip(clsdt_val)
+        if hasil:
+            return hasil, "CLSDT"
+    return clean_slip(fac_val), "FAC"
+
+
+_CERT_RE = re.compile(r"-(\d{3})-\d+$")
+
+
+def clean_certificate(clsdt_polis) -> str:
+    """
+    Certificate diambil dari segmen 3 digit di ujung CLSDT_POLICY_NO:
+      TMD/EEAR/16-E0006258-009-03 -> 000009
+      TMD/FIAR/24-F5040056-005-01 -> 000005
+      TMI/FIAR/23-F5041278-000-01 -> "" (000 = tidak ada certificate)
+    """
+    if not _is_valid_clsdt(clsdt_polis):
+        return ""
+    m = _CERT_RE.search(str(clsdt_polis).strip().upper())
+    if not m or int(m.group(1)) == 0:
+        return ""
+    return str(int(m.group(1))).zfill(6)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -664,7 +814,8 @@ def process_data(input_file: str, output_file: str) -> None:
         print(f"        Kolom tersedia: {list(df.columns)}")
         return
 
-    for col in [POLIS_COL, SLIP_COL, INSURED_COL]:
+    for col in [POLIS_COL, SLIP_COL, INSURED_COL,
+                CLSDT_POLICY_COL, CLSDT_SLIP_COL]:
         if col not in df.columns:
             print(f"\n[ERROR] Kolom '{col}' tidak ditemukan di file!")
             print(f"        Kolom tersedia: {list(df.columns)}")
@@ -673,6 +824,12 @@ def process_data(input_file: str, output_file: str) -> None:
     df[CEDANT_COL] = df[CEDANT_COL].fillna("").astype(str).str.strip()
     is_tokio = df[CEDANT_COL] == CEDANT_VALUE
     print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {is_tokio.sum():,} baris TOKIO dari total {len(df):,} baris.")
+
+    # Buang semua baris selain cedant Tokio -> output hanya Tokio
+    total_awal = len(df)
+    df = df[is_tokio].reset_index(drop=True)
+    is_tokio = pd.Series(True, index=df.index)
+    print(f"      Baris non-Tokio dibuang: {total_awal - len(df):,} | sisa: {len(df):,}")
 
     df.rename(columns={POLIS_COL: "polis_ori", SLIP_COL: "slip_ori", INSURED_COL: "insured_ori"},
               inplace=True)
@@ -691,6 +848,11 @@ def process_data(input_file: str, output_file: str) -> None:
     polis_vals   = df["polis_ori"].to_numpy()
     slip_vals    = df["slip_ori"].to_numpy()
     insured_vals = df["insured_ori"].to_numpy()
+    clsdt_polis_vals = df[CLSDT_POLICY_COL].to_numpy()
+    clsdt_slip_vals  = df[CLSDT_SLIP_COL].to_numpy()
+
+    src_polis = {"CLSDT": 0, "FAC": 0}
+    src_slip  = {"CLSDT": 0, "FAC": 0}
 
     total_t = len(tokio_idx)
     for n_done, pos in enumerate(tokio_idx, 1):
@@ -698,10 +860,12 @@ def process_data(input_file: str, output_file: str) -> None:
             print(f"      Progress: {n_done:,} / {total_t:,} baris TOKIO diproses...")
 
         p_ori = polis_vals[pos]
-        c_polis = clean_polis(p_ori)
-        c_slip  = clean_slip(slip_vals[pos])
+        c_polis, s_polis = clean_polis_clsdt(clsdt_polis_vals[pos], p_ori)
+        c_slip,  s_slip  = clean_slip_clsdt(clsdt_slip_vals[pos], slip_vals[pos])
         c_ins   = clean_insured(insured_vals[pos])
-        c_cert  = clean_certificate(p_ori)
+        c_cert  = clean_certificate(clsdt_polis_vals[pos])
+        src_polis[s_polis] += 1
+        src_slip[s_slip]   += 1
 
         max_polis = max(max_polis, len(c_polis))
         max_slip  = max(max_slip,  len(c_slip))
@@ -716,6 +880,8 @@ def process_data(input_file: str, output_file: str) -> None:
     print(f"      -> Jumlah kolom clean polis  : {max_polis}")
     print(f"      -> Jumlah kolom clean slip   : {max_slip}")
     print(f"      -> Jumlah kolom clean insured: {max_ins}")
+    print(f"      -> Sumber polis : CLSDT {src_polis['CLSDT']:,} | fallback FAC {src_polis['FAC']:,}")
+    print(f"      -> Sumber slip  : CLSDT {src_slip['CLSDT']:,} | fallback FAC {src_slip['FAC']:,}")
 
     print("[4/5] Menyusun kolom output ...")
 
@@ -728,14 +894,32 @@ def process_data(input_file: str, output_file: str) -> None:
 
         new_columns.append(col)
         if col == "polis_ori":
-            new_columns.append("CERTIFICATE")
-            new_columns += _insert_clean_columns(df, all_clean_polis, "polis",   max_polis)
+            clean_polis_cols = _insert_clean_columns(df, all_clean_polis, "polis", MAX_SPLIT_COLS)
+            if clean_polis_cols:
+                new_columns.append(clean_polis_cols[0])
+                new_columns.append("CERTIFICATE")
+                new_columns += clean_polis_cols[1:]
+            else:
+                new_columns.append("CERTIFICATE")
         elif col == "slip_ori":
-            new_columns += _insert_clean_columns(df, all_clean_slip,  "slip",    max_slip)
+            new_columns += _insert_clean_columns(df, all_clean_slip,  "slip",    MAX_SPLIT_COLS)
         elif col == "insured_ori":
-            new_columns += _insert_clean_columns(df, all_clean_ins,   "insured", max_ins)
+            new_columns += _insert_clean_columns(df, all_clean_ins,   "insured", MAX_SPLIT_COLS)
 
     df = df[new_columns]
+
+    # Ganti nama kolom sesuai header final & urutkan
+    df = df.rename(columns=_HEADER_RENAME)
+
+    missing = [c for c in OUTPUT_HEADERS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Kolom berikut tidak ada di data: {missing}")
+
+    extra = [c for c in df.columns if c not in OUTPUT_HEADERS]
+    if extra:
+        print(f"      [INFO] Kolom di luar header yang ditentukan (ditaruh di paling kanan): {extra}")
+
+    df = df[OUTPUT_HEADERS + extra]
 
     print(f"[5/5] Menyimpan hasil cepat ke: {output_file} ...")
     _fast_write_excel(df, output_file)

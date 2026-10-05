@@ -10,9 +10,24 @@ print("SCRIPT BERJALAN")
 # KONFIGURASI
 # ─────────────────────────────────────────────────────────────────────────────
 
-INPUT_FILE  = os.path.join("input", "3b. Database Suspense 150826.xlsx")
-OUTPUT_FILE = os.path.join("output", "rev_tokio_output_suspend.xlsx")
+INPUT_FILE  = os.path.join("data_raw", "3b. Database Suspense 150826.xlsx")
+OUTPUT_FILE = os.path.join("data_cleaned", "tokio_output_suspend.xlsx")
 SHEET_NAME  = 0
+
+# Header output suspend (urutan & nama kolom final)
+OUTPUT_HEADERS = [
+    "RECEIPT NO", "CREDIT NOTES", "DETAIL RINCIAN NO", "RECEIPT DATE",
+    "CEDANT NAME", "CEDANT SHRT NAME",
+    "INSURED", "INSURED_CLEAN",
+    "CURR ORI", "AMOUNT ORI", "CURR PAY", "AMOUNT PAY",
+    "POLIS", "POLIS_CLEAN", "CERTIFICATE_1",
+    "SLIP NO", "SLIP_NO_CLEAN",
+    "DESC 1", "DESC 2", "DESC 3", "DESC 4",
+    "STATUS", "REC_TYPE", "CEK FASE",
+]
+
+# Kalau hasil clean terdiri dari >1 bagian, digabung dalam satu sel dengan pemisah ini
+CLEAN_JOIN_SEP = "; "
 
 # Business rule: kalau hasil breakdown (insured/polis/slip) > 5 bagian,
 # tidak usah dipecah per kolom -> digabung lagi jadi satu kolom.
@@ -397,55 +412,30 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print("[4/5] Menyusun kolom output ...")
 
-    # <--- 4. MASUKKAN Certificate KE DATAFRAME
-    df["Certificate"] = all_Certificates
+    def _join(lst: list):
+        return CLEAN_JOIN_SEP.join(lst) if lst else None
 
-    new_columns = []
+    df["INSURED_CLEAN"] = [_join(x) for x in all_clean_ins]
+    df["POLIS_CLEAN"] = [_join(x) for x in all_clean_polis]
+    df["SLIP_NO_CLEAN"] = [_join(x) for x in all_clean_slip]
+    df["CERTIFICATE_1"] = all_Certificates
 
-    for col in df.columns:
-        if col == "Certificate":
-            continue
+    # Kembalikan nama kolom asli (sebelumnya di-rename jadi *_ori)
+    df = df.rename(columns={
+        "insured_ori": "INSURED",
+        "polis_ori": "POLIS",
+        "slip_ori": "SLIP NO",
+    })
 
-        new_columns.append(col)
+    missing = [c for c in OUTPUT_HEADERS if c not in df.columns]
+    if missing:
+        raise ValueError(f"Kolom berikut tidak ada di data: {missing}")
 
-        if col == "polis_ori":
-            clean_polis_columns = _expand_clean_columns(
-                df,
-                all_clean_polis,
-                "polis",
-                max_polis,
-            )
+    extra = [c for c in df.columns if c not in OUTPUT_HEADERS]
+    if extra:
+        print(f"      [INFO] Kolom di luar header yang ditentukan (ditaruh di paling kanan): {extra}")
 
-            # POLIS ORI
-            new_columns.append(col)
-
-            # clean polis 1
-            if clean_polis_columns:
-                new_columns.append(clean_polis_columns[0])
-
-            # Certificate
-            new_columns.append("Certificate")
-
-            # clean polis 2, 3, dst.
-            new_columns += clean_polis_columns[1:]
-
-        elif col == "slip_ori":
-            new_columns += _expand_clean_columns(
-                df,
-                all_clean_slip,
-                "slip",
-                max_slip,
-            )
-
-        elif col == "insured_ori":
-            new_columns += _expand_clean_columns(
-                df,
-                all_clean_ins,
-                "insured",
-                max_ins,
-            )
-
-    df = df[new_columns]
+    df = df[OUTPUT_HEADERS + extra]
 
     print(f"[5/5] Menyimpan hasil ke: {output_file} ...")
 
