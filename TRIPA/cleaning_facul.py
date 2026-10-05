@@ -10,12 +10,12 @@ import pandas as pd
 # ============================================================
 
 INPUT_FILE = os.path.join(
-    "input",
+    "data_raw",
     "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx"
 )
 
 OUTPUT_FILE = os.path.join(
-    "output",
+    "data_cleaned",
     "tripa_output_facul.xlsx"
 )
 
@@ -380,11 +380,12 @@ def clean_polis(val) -> list:
         base = parts[0]
         suffixes = parts[1:]
 
-        if len(suffixes) == 1:
-            return [base]
-
         hasil = [base]
         for suffix in suffixes:
+            # Jika suffix adalah nomor sertifikat (biasanya 6 digit diawali banyak 0)
+            if len(suffix) == 6 and suffix.startswith("000"):
+                continue
+
             if len(suffix) < len(base):
                 polis = base[:len(base) - len(suffix)] + suffix
             else:
@@ -772,7 +773,7 @@ def get_mitra_bisnis(broker_name, broker_code, cedant) -> str:
 def _insert_clean_columns(df: pd.DataFrame, all_lists: list, prefix: str, max_cols: int) -> list:
     added = []
     for i in range(1, max_cols + 1):
-        col_name = f"clean {prefix} {i}"
+        col_name = f"{prefix}_{i}"
         df[col_name] = [lst[i - 1] if i - 1 < len(lst) else None for lst in all_lists]
         added.append(col_name)
     return added
@@ -878,17 +879,8 @@ def process_data(input_file: str, output_file: str) -> None:
         for bn, bc, cd in zip(broker_name_s, broker_code_s, cedant_s)
     ]
 
-    df.rename(
-        columns={
-            POLIS_COL: "polis_ori",
-            SLIP_COL: "slip_ori",
-            INSURED_COL: "insured_ori"
-        },
-        inplace=True
-    )
-
     insert_pos = list(df.columns).index(BROKER_NAME_COL) + 1 if BROKER_NAME_COL in df.columns else len(df.columns)
-    df.insert(insert_pos, "BUSINESS PARTNERS", mitra_values)
+    df.insert(insert_pos, "BUSINESS_PARTNERS", mitra_values)
 
     print("\n[3/5] Menjalankan proses cleaning hanya untuk baris TRIPA ...")
 
@@ -903,9 +895,9 @@ def process_data(input_file: str, output_file: str) -> None:
     max_ins = 1
 
     tripa_idx = np.flatnonzero(is_tripa.to_numpy())
-    polis_vals = df["polis_ori"].to_numpy()
-    slip_vals = df["slip_ori"].to_numpy()
-    insured_vals = df["insured_ori"].to_numpy()
+    polis_vals = df[POLIS_COL].to_numpy()
+    slip_vals = df[SLIP_COL].to_numpy()
+    insured_vals = df[INSURED_COL].to_numpy()
 
     for n_done, pos in enumerate(tripa_idx, 1):
         if n_done % 5_000 == 0:
@@ -934,32 +926,32 @@ def process_data(input_file: str, output_file: str) -> None:
     print("\n[4/5] Menyusun kolom output ...")
 
     # MASUKKAN CERTIFICATE KE DATAFRAME
-    df["CERTIFICATE"] = all_certificates
+    df["CERTIFICATE_1"] = all_certificates
 
     new_columns = []
     for col in df.columns:
-        if col == "CERTIFICATE":
+        if col == "CERTIFICATE_1":
             continue
 
         new_columns.append(col)
 
-        if col == "polis_ori":
+        if col == POLIS_COL:
             polis_cols = _insert_clean_columns(
-                df, all_clean_polis, "polis", max_polis
+                df, all_clean_polis, "FAC_POLICY_CLEAN", max_polis
             )
 
             new_columns += polis_cols
 
             # CERTIFICATE di sebelah kanan clean polis 1
-            if "clean polis 1" in polis_cols:
-                idx = new_columns.index("clean polis 1") + 1
-                new_columns.insert(idx, "CERTIFICATE")
+            if "FAC_POLICY_CLEAN_1" in polis_cols:
+                idx = new_columns.index("FAC_POLICY_CLEAN_1") + 1
+                new_columns.insert(idx, "CERTIFICATE_1")
 
-        elif col == "slip_ori":
-            new_columns += _insert_clean_columns(df, all_clean_slip, "slip", max_slip)
+        elif col == SLIP_COL:
+            new_columns += _insert_clean_columns(df, all_clean_slip, "FAC_SLIP_CLEAN", max_slip)
 
-        elif col == "insured_ori":
-            new_columns += _insert_clean_columns(df, all_clean_ins, "insured", max_ins)
+        elif col == INSURED_COL:
+            new_columns += _insert_clean_columns(df, all_clean_ins, "FAC_INSURED_CLN", max_ins)
 
     df = df[new_columns]
 

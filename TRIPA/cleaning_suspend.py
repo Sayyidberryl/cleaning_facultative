@@ -10,8 +10,8 @@ print("SCRIPT BERJALAN")
 # KONFIGURASI
 # ─────────────────────────────────────────────────────────────────────────────
 
-INPUT_FILE  = os.path.join("input", "3b. Database Suspense 150826.xlsx")
-OUTPUT_FILE = os.path.join("output", "rev_tripa_output_suspend.xlsx")
+INPUT_FILE  = os.path.join("data_raw", "3b. Database Suspense 150826.xlsx")
+OUTPUT_FILE = os.path.join("data_cleaned", "tripa_output_suspend.xlsx")
 SHEET_NAME  = 0
 
 # Filter cedant: hanya baris cedant ini yang dipertahankan.
@@ -422,7 +422,7 @@ def _expand_clean_columns(
     added = []
 
     for i in range(1, max_cols + 1):
-        col_name = f"clean {prefix} {i}"
+        col_name = f"{prefix}" if max_cols == 1 else f"{prefix}_{i}"
         df[col_name] = [
             lst[i - 1] if i - 1 < len(lst) else None
             for lst in all_lists
@@ -494,18 +494,6 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print(f"[2/5] Total baris yang akan diproses: {len(df):,}")
 
-    # Rename kolom asli -> _ori
-    rename_map = {
-        "INSURED": "insured_ori",
-        "POLIS": "polis_ori",
-        "SLIP NO": "slip_ori",
-    }
-
-    df.rename(
-        columns={k: v for k, v in rename_map.items() if k in df.columns},
-        inplace=True,
-    )
-
     print(
         "[3/5] Menjalankan proses cleaning untuk rule TRIPA ..."
     )
@@ -520,9 +508,9 @@ def process_data(input_file: str, output_file: str) -> None:
     max_ins = 1
 
     for idx, (_, row) in enumerate(df.iterrows()):
-        p_ori = row.get("polis_ori", "")
-        s_ori = row.get("slip_ori", "")
-        i_ori = row.get("insured_ori", "")
+        p_ori = row.get("POLIS", "")
+        s_ori = row.get("SLIP NO", "")
+        i_ori = row.get("INSURED", "")
 
         c_polis = clean_polis(p_ori)
         c_slip = clean_slip(s_ori)
@@ -546,51 +534,45 @@ def process_data(input_file: str, output_file: str) -> None:
     print("[4/5] Menyusun kolom output ...")
 
     # Masukkan kolom Certificate ke DataFrame
-    df["Certificate"] = all_Certificates
+    df["CERTIFICATE_1"] = all_Certificates
 
     new_columns = []
     for col in df.columns:
-        if col == "Certificate":
+        if col == "CERTIFICATE_1":
             continue
 
-        if col == "polis_ori":
-            # Urutan:
-            # polis_ori -> clean polis 1 -> Certificate -> clean polis 2 dst.
+        if col == "POLIS":
             new_columns.append(col)
 
             clean_polis_columns = _expand_clean_columns(
                 df,
                 all_clean_polis,
-                "polis",
+                "POLIS_CLEAN",
                 max_polis,
             )
 
             if clean_polis_columns:
                 new_columns.append(clean_polis_columns[0])
-
-                # Certificate tepat di kanan clean polis 1
-                new_columns.append("Certificate")
-
-                # Sisanya clean polis 2, 3, dst.
+                new_columns.append("CERTIFICATE_1")
                 new_columns += clean_polis_columns[1:]
             else:
-                new_columns.append("Certificate")
+                new_columns.append("CERTIFICATE_1")
 
-        elif col == "slip_ori":
+        elif col == "SLIP NO":
             new_columns.append(col)
             new_columns += _expand_clean_columns(
                 df,
                 all_clean_slip,
-                "slip",
+                "SLIP_NO_CLEAN",
                 max_slip,
             )
 
-        elif col == "insured_ori":
+        elif col == "INSURED":
             new_columns.append(col)
             new_columns += _expand_clean_columns(
                 df,
                 all_clean_ins,
-                "insured",
+                "INSURED_CLEAN",
                 max_ins,
             )
 

@@ -5,9 +5,9 @@ from pathlib import Path
 import pandas as pd
 
 
-BASE_DIR = Path(__file__).resolve().parent
-INPUT_FILE = BASE_DIR / "input" / "2b. transaksi Osbal 01.01.23 - 17.08.26.xlsx"
-OUTPUT_FILE = BASE_DIR / "output" / "tripa_output_osbal.xlsx"
+BASE_DIR = Path(__file__).resolve().parent.parent
+INPUT_FILE = BASE_DIR / "data_raw" / "2b. transaksi Osbal 01.01.23 - 17.08.26.xlsx"
+OUTPUT_FILE = BASE_DIR / "data_cleaned" / "tripa_output_osbal.xlsx"
 
 CEDANT_COL   = "CCOS_COMP_NAME"
 CEDANT_VALUE = "PT ASURANSI TRIPAKARTA"
@@ -330,13 +330,17 @@ def clean_polis_raw(val) -> list:
         suffix = repeat_match.group(2)
 
         if len(suffix) < len(base):
+            results = [base]
+
+            # Jika suffix adalah nomor sertifikat (biasanya 6 digit diawali banyak 0)
+            # Jangan dibuat perulangan polis
+            if len(suffix) == 6 and suffix.startswith("000"):
+                return results
 
             candidate = _build_repeated_polis(
                 base,
                 suffix,
             )
-
-            results = [base]
 
             if candidate and candidate not in results:
                 results.append(candidate)
@@ -828,6 +832,15 @@ def clean_polis(val) -> list:
         flags=re.IGNORECASE,
     ).strip()
 
+    # Hapus suffix certificate yang berupa range SD (misal: - 000003 SD 000015)
+    # Agar output clean_polis hanya mengembalikan base polisnya saja
+    original = re.sub(
+        r"\s*-\s*\d{1,6}\s*S\s*/?\s*D\s*\d{1,6}.*",
+        "",
+        original,
+        flags=re.IGNORECASE,
+    ).strip()
+
     hasil = clean_polis_raw(original)
     hasil_clean = []
 
@@ -1263,6 +1276,9 @@ def clean_slip(val):
 
                 if base not in repeated_result:
                     repeated_result.append(base)
+
+                if len(suffix) == 6 and suffix.startswith("000"):
+                    continue
 
                 candidate = build_repeated_number(
                     base,
@@ -1750,7 +1766,7 @@ def _insert_clean_columns(
     added = []
 
     for i in range(1, max_cols + 1):
-        col_name = f"clean {prefix} {i}"
+        col_name = f"{prefix}_{i}"
 
         df[col_name] = [
             lst[i - 1]
@@ -1861,21 +1877,12 @@ def process_data(input_file: Path, output_file: Path) -> None:
     is_tripa = pd.Series(True, index=df.index)
     print(f"      Baris cedant lain dibuang: {total_lain:,} | sisa: {len(df):,}")
 
-    df.rename(
-        columns={
-            POLIS_COL: "polis_ori",
-            SLIP_COL: "slip_ori",
-            INSURED_COL: "insured_ori",
-        },
-        inplace=True,
-    )
-
     print("[3/5] Menjalankan proses cleaning hanya untuk TRIPA ...")
 
     # Ambil data kolom yang dibutuhkan dalam bentuk list untuk pemrosesan cepat
-    polis_ori_list = df["polis_ori"].tolist()
-    slip_ori_list = df["slip_ori"].tolist()
-    insured_ori_list = df["insured_ori"].tolist()
+    polis_ori_list = df[POLIS_COL].tolist()
+    slip_ori_list = df[SLIP_COL].tolist()
+    insured_ori_list = df[INSURED_COL].tolist()
     clsdt_polis_list = df["CLSDT_POLICY_NO"].tolist()
     clsdt_slip_list = df["CLSDT_SLIP_NO"].tolist()
     is_tripa_list = is_tripa.tolist()
@@ -1948,60 +1955,46 @@ def process_data(input_file: Path, output_file: Path) -> None:
     print("[4/5] Menyusun kolom output ...")
 
     # TAMBAHKAN CERTIFICATE KE DATAFRAME TERLEBIH DAHULU (Solusi KeyError)
-    df["CERTIFICATE"] = all_certificates
+    df["CERTIFICATE_1"] = all_certificates
 
     new_columns = []
     for col in df.columns:
         # Hindari memasukkan CERTIFICATE pada posisi aslinya
-        if col == "CERTIFICATE":
+        if col == "CERTIFICATE_1":
             continue
 
-        if col == "polis_ori":
-            # Urutan:
-            # polis_ori
-            # clean polis 1
-            # CERTIFICATE
-            # clean polis 2
-            # clean polis 3
-            # dst.
-
+        if col == POLIS_COL:
             new_columns.append(col)
 
             clean_polis_columns = _insert_clean_columns(
                 df,
                 all_clean_polis,
-                "polis",
+                "FAC_POLICY_NO_CLEAN",
                 max_polis,
             )
 
             if clean_polis_columns:
-                # clean polis 1
                 new_columns.append(clean_polis_columns[0])
-
-                # CERTIFICATE di sebelah kanan clean polis 1
-                new_columns.append("CERTIFICATE")
-
-                # clean polis 2, 3, 4, 5
+                new_columns.append("CERTIFICATE_1")
                 new_columns += clean_polis_columns[1:]
             else:
-                # Kalau tidak ada clean polis 1
-                new_columns.append("CERTIFICATE")
+                new_columns.append("CERTIFICATE_1")
 
-        elif col == "slip_ori":
+        elif col == SLIP_COL:
             new_columns.append(col)
             new_columns += _insert_clean_columns(
                 df,
                 all_clean_slip,
-                "slip",
+                "FAC_SLIP_CLEAN",
                 max_slip,
             )
 
-        elif col == "insured_ori":
+        elif col == INSURED_COL:
             new_columns.append(col)
             new_columns += _insert_clean_columns(
                 df,
                 all_clean_ins,
-                "insured",
+                "FAC_INSURED_CLN",
                 max_ins,
             )
 
