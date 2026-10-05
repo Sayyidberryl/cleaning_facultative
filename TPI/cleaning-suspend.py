@@ -99,10 +99,19 @@ KNOWN_SLIP_PATTERNS = [
     re.compile(r"^\d{17,19}$"),                     # 29133060324000000 / 891310202212000008
     re.compile(r"^\d{10}\s*/\s*PAYMENT NUMBER\s*\d{10}$", re.IGNORECASE),
     re.compile(r"^TIDAK ADA$", re.IGNORECASE),
-    # Slip Data 3 kompleks: tanggal+currency+kode+angka, mis.
-    # 03250000000243202400IDRFFW1100000030I70
-    re.compile(r"^\d{18,22}[A-Za-z]{3}[A-Za-z0-9]{3}\d{10}[A-Za-z]\d{2}$"),
 ]
+
+_COMPOSITE_SLIP_RE = re.compile(
+    r"(?:IDR|USD|EUR|SGD|JPY|GBP|AUD|CNY|MYR|CHF|THB)[\s\-]*"
+    r"(?:[A-Za-z][A-Za-z0-9]{1,3}|[A-Za-z0-9]{1,3}[A-Za-z])[\s\-]*"
+    r"(\d{10})(?!\d)",
+    re.IGNORECASE,
+)
+
+_COMPOSITE_POLIS_RE = re.compile(
+    r"^([A-Za-z]{3}\d{7}|\d{14})[\s\-]*(?:19|20)\d{2}.*(?:IDR|USD|EUR|SGD|JPY|GBP|AUD|CNY|MYR|CHF|THB)",
+    re.IGNORECASE,
+)
 
 
 def _matches_known_pattern(value: str, patterns) -> bool:
@@ -161,6 +170,11 @@ def clean_polis(val) -> str:
     if _POLIS_KEEP_AS_IS_RE.match(val):
         return val
 
+    # Jika berupa string gabungan (Polis+Tahun+Currency+Kode+Slip+Suffix), ambil nomor polisnya
+    comp_polis = _COMPOSITE_POLIS_RE.search(val)
+    if comp_polis:
+        return comp_polis.group(1)
+
     # Hanya hapus suffix -EXT(angka) di bagian paling akhir.
     p = re.sub(r"-EXT\(\d+\)$", "", val, flags=re.IGNORECASE)
 
@@ -175,10 +189,19 @@ def clean_polis(val) -> str:
 
 
 def clean_slip(val) -> str:
-    """Slip Data 3 & Data 2 dibiarkan apa adanya (sesuai catatan pola TPI)."""
+    """Bersihkan nomor slip. Jika berbentuk string gabungan
+    (Polis+Tahun+Currency+Kode+Slip+Suffix), ekstrak slip 10-digit."""
     if pd.isna(val):
         return ""
-    return str(val).strip()
+    val_str = str(val).strip()
+    if not val_str:
+        return ""
+
+    m = _COMPOSITE_SLIP_RE.search(val_str)
+    if m:
+        return m.group(1)
+
+    return val_str
 
 
 def _remove_polis_slip_from_text(text: str, polis_ori, slip_ori) -> str:

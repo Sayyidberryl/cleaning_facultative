@@ -301,8 +301,19 @@ KNOWN_SLIP_PATTERNS = [
     re.compile(r"^\d{17,19}$"),                     # 29133060324000000 / 891310202212000008
     re.compile(r"^\d{10}\s*/\s*PAYMENT NUMBER\s*\d{10}$", re.IGNORECASE),
     re.compile(r"^TIDAK ADA$", re.IGNORECASE),
-    re.compile(r"^\d{18,22}[A-Za-z]{3}[A-Za-z0-9]{3}\d{10}[A-Za-z]\d{2}$"),
 ]
+
+_COMPOSITE_SLIP_RE = re.compile(
+    r"(?:IDR|USD|EUR|SGD|JPY|GBP|AUD|CNY|MYR|CHF|THB)[\s\-]*"
+    r"(?:[A-Za-z][A-Za-z0-9]{1,3}|[A-Za-z0-9]{1,3}[A-Za-z])[\s\-]*"
+    r"(\d{10})(?!\d)",
+    re.IGNORECASE,
+)
+
+_COMPOSITE_POLIS_RE = re.compile(
+    r"^([A-Za-z]{3}\d{7}|\d{14})[\s\-]*(?:19|20)\d{2}.*(?:IDR|USD|EUR|SGD|JPY|GBP|AUD|CNY|MYR|CHF|THB)",
+    re.IGNORECASE,
+)
 
 
 def _matches_known_pattern(value: str, patterns) -> bool:
@@ -810,6 +821,10 @@ def clean_polis(val) -> list:
     if not val:
         return []
 
+    comp_polis = _COMPOSITE_POLIS_RE.search(val)
+    if comp_polis:
+        return [comp_polis.group(1)]
+
     _trigger = (
         "+" in val
         or "/" in val
@@ -923,6 +938,10 @@ def clean_slip(val) -> list:
     val = str(val).strip()
     if not val:
         return []
+
+    comp_matches = _COMPOSITE_SLIP_RE.findall(val)
+    if comp_matches:
+        return comp_matches
 
     _trigger = (
         "+" in val
