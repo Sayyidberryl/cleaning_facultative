@@ -378,6 +378,10 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
     val = _remove_polis_slip_from_text(val, polis_ori, slip_ori)
     val = _ATTN_TAIL_RE.sub("", val)
 
+    # Tangani alias PERUM PERURI dalam kurung: ubah jadi pemisah "/ ALIAS"
+    # agar bisa muncul sebagai INSURED_2, sebelum penghapusan kurung umum.
+    val = re.sub(r"\((PERUM\s+PERURI)\)", r"/ \1", val, flags=re.IGNORECASE)
+
     val = re.sub(r"\(\s*[\d\.\/\-]+\s*\)", "", val)
     val = re.sub(r"\b(?:AND|AN|OR)\s*/\s*(?:AND|OR)\b", ",", val, flags=re.IGNORECASE)
     val = re.sub(r"\bAND\s+OR\b", ",", val, flags=re.IGNORECASE)
