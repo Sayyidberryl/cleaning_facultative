@@ -1,3 +1,4 @@
+import datetime
 import os
 import re
 
@@ -185,6 +186,110 @@ def _unique(items):
     return out
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAPPING PREFIX COB BERDASARKAN CLASS_NAME (Dictionary Tokio M)
+# ─────────────────────────────────────────────────────────────────────────────
+CLASS_TO_COB_PREFIX = {
+    "MARINE CARGO":            "MINL",
+    "PAR":                     "FPAR",
+    "PROPERTY ALL RISK":       "FPAR",
+    "IAR":                     "FIAR",
+    "INDUSTRIAL ALL RISK":     "FIAR",
+    "EAR":                     "ECAR",
+    "COMPREHENSIVE L":         "LGEN",
+    "PUBLIC LIABILITY":        "LGEN",
+    "MB":                      "EMCB",
+    "MACHINERY BREAKDOWN":     "EMCB",
+    "CAR":                     "EEAR",
+    "PROF INDEMNITY":          "LPIC",
+    "PROFESSIONAL INDEMNITY":  "LPIC",
+    "MARINE HULL":             "HMAR",
+}
+
+_RE_PREFIX_YEAR_CORE = re.compile(r"^([A-Z]+)(\d{2})([A-Z]\d{7,8})$")
+_RE_POLIS_YEAR_CORE   = re.compile(r"^(\d{2})([A-Z]\d{7,8})$")
+_RE_POLIS_CORE_ONLY   = re.compile(r"^([A-Z]\d{7,8})$")
+
+
+def _extract_year2(val) -> str:
+    """Ekstrak 2 digit tahun dari tanggal (Timestamp, datetime, atau string format tanggal)."""
+    if val is None or pd.isna(val):
+        return ""
+    if isinstance(val, (pd.Timestamp, datetime.date, datetime.datetime)):
+        return f"{val.year % 100:02d}"
+    s = str(val).strip()
+    if not s or s.upper() in ("NAN", "NONE", "NAT"):
+        return ""
+    # Format YYYY-... di awal, contoh '2026-09-09', '2023-01-01'
+    m_year_start = re.match(r"^(?:19|20)(\d{2})", s)
+    if m_year_start:
+        return m_year_start.group(1)
+    # Format DD/MM/YYYY atau DD-MM-YYYY
+    m_year_end = re.search(r"[/.-](?:19|20)(\d{2})\b", s)
+    if m_year_end:
+        return m_year_end.group(1)
+    return ""
+
+
+def augment_cleaned_polis(c_polis: list, class_name, fac_com_date) -> list:
+    """
+    Melengkapi format polis OSBAL yang tidak lengkap berdasarkan CLASS_NAME & FAC_COM_DATE,
+    serta membetulkan typo 2 digit tahun pada nomor polis jika berbeda dengan tahun FAC_COM_DATE:
+    1. Koreksi typo tahun: jika polis sudah punya prefix (misal TMDFIAR23F0041968) namun FAC_COM_DATE
+       berada di tahun 2022, tahun pada polis dibetulkan menjadi TMDFIAR22F0041968.
+    2. Format 10 digit (2 digit tahun + 1 huruf + 7-8 angka, misal 26F0003746):
+       -> tambahkan prefix format COB dari CLASS_NAME (dan sesuaikan tahun jika berbeda dari FAC_COM_DATE).
+          Contoh: CLASS_NAME = PAR -> FPAR26F0003746
+    3. Format 8 digit (1 huruf + 7-8 angka, misal F0003746 / F5000953):
+       -> tambahkan prefix format COB dari CLASS_NAME + 2 digit tahun dari FAC_COM_DATE.
+          Contoh: CLASS_NAME = PAR, FAC_COM_DATE = 2026-09-09 -> FPAR26F0003746
+          Contoh: CLASS_NAME = PAR, FAC_COM_DATE tahun 2023   -> FPAR23F5000953
+    """
+    if not c_polis:
+        return c_polis
+
+    cls_str = "" if pd.isna(class_name) else str(class_name).strip().upper()
+    prefix = CLASS_TO_COB_PREFIX.get(cls_str, "")
+    year2 = _extract_year2(fac_com_date)
+
+    augmented = []
+    for item in c_polis:
+        item_str = str(item).strip().upper()
+
+        # Case 0: Polis sudah punya prefix huruf + 2 digit tahun + core
+        # Contoh: TMDFIAR23F0041968 dengan FAC_COM_DATE tahun 2022 -> TMDFIAR22F0041968
+        m_full = _RE_PREFIX_YEAR_CORE.match(item_str)
+        if m_full:
+            pol_pref, pol_year, pol_core = m_full.group(1), m_full.group(2), m_full.group(3)
+            if year2 and pol_year != year2:
+                augmented.append(f"{pol_pref}{year2}{pol_core}")
+            else:
+                augmented.append(item_str)
+            continue
+
+        # Case 1: 10-11 char (2 digit tahun + huruf + angka, misal 26F0003746)
+        m10 = _RE_POLIS_YEAR_CORE.match(item_str)
+        if m10:
+            pol_year, pol_core = m10.group(1), m10.group(2)
+            eff_year = year2 if year2 else pol_year
+            if prefix:
+                augmented.append(f"{prefix}{eff_year}{pol_core}")
+            else:
+                augmented.append(f"{eff_year}{pol_core}")
+            continue
+
+        # Case 2: 8-9 char (huruf + angka, misal F0003746 / F5000953)
+        m8 = _RE_POLIS_CORE_ONLY.match(item_str)
+        if m8 and prefix and year2:
+            augmented.append(f"{prefix}{year2}{item_str}")
+            continue
+
+        augmented.append(item)
+
+    return augmented
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLEAN POLIS TOKIO
 # ─────────────────────────────────────────────────────────────────────────────
@@ -230,6 +335,14 @@ def clean_polis_raw(val) -> list:
     )
     if m:
         return [m.group(1).upper()]
+
+    m = re.fullmatch(
+        r"(\d{2}-?[A-Z]\d{7,8})(?:-000-\d+)?",
+        val,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        return [m.group(1).upper().replace("-", "")]
 
     m = re.fullmatch(
         r"([A-Z]\d{7,8})(?:-000-\d+)?",
@@ -313,6 +426,12 @@ def clean_polis_raw(val) -> list:
                 results.append(tokio_prefix + m.group(2).upper())
                 continue
                 
+            m = re.fullmatch(r"(\d{2}-?[A-Z]\d{7,8})", p, flags=re.IGNORECASE)
+            if m:
+                code = m.group(1).upper().replace("-", "")
+                results.append(tokio_prefix + code if tokio_prefix else code)
+                continue
+
             m = re.fullmatch(r"[A-Z]\d{7,8}", p, flags=re.IGNORECASE)
             if m:
                 code = m.group(0).upper()
@@ -417,6 +536,16 @@ def clean_polis_raw(val) -> list:
     if len(hasil) > 1:
         return _cap_or_join(_unique([x.upper() for x in hasil]))
 
+    hasil_10 = re.findall(
+        r"\b\d{2}[A-Z]\d{7,8}\b",
+        val,
+        flags=re.IGNORECASE
+    )
+    if len(hasil_10) > 1:
+        return _cap_or_join(_unique([x.upper() for x in hasil_10]))
+    if len(hasil_10) == 1 and not re.search(r"(?:TMD|TMI)[A-Z]", val, flags=re.IGNORECASE):
+        return [hasil_10[0].upper()]
+
     hasil = re.findall(
         r"[A-Z]\d{7,8}",
         val,
@@ -427,6 +556,10 @@ def clean_polis_raw(val) -> list:
 
     if re.match(r"^(TMD|TMI)[A-Z0-9]+$", val):
         return [val.upper()]
+
+    m = re.search(r"\b\d{2}[A-Z]\d{7,8}\b", val)
+    if m:
+        return [m.group(0).upper()]
 
     m = re.search(r"[A-Z]\d{7,8}", val)
     if m:
@@ -717,16 +850,18 @@ def _is_valid_clsdt(val) -> bool:
     return str(val).strip().upper() not in CLSDT_INVALID_VALUES
 
 
-def clean_polis_clsdt(clsdt_val, fac_val) -> tuple:
+def clean_polis_clsdt(clsdt_val, fac_val, class_name=None, fac_com_date=None) -> tuple:
     """
     Prioritas CLSDT_POLICY_NO; kalau tidak valid (atau hasil cleaning kosong)
     fallback ke FAC_POLICY_NO. Return (list clean polis, sumber).
+    Nomor polis pendek yang tidak lengkap diaugmentasi berdasarkan CLASS_NAME & FAC_COM_DATE.
     """
     if _is_valid_clsdt(clsdt_val):
         hasil = clean_polis(clsdt_val)
         if hasil:
-            return hasil, "CLSDT"
-    return clean_polis(fac_val), "FAC"
+            return augment_cleaned_polis(hasil, class_name, fac_com_date), "CLSDT"
+    hasil = clean_polis(fac_val)
+    return augment_cleaned_polis(hasil, class_name, fac_com_date), "FAC"
 
 
 def clean_slip_clsdt(clsdt_val, fac_val) -> tuple:
@@ -790,7 +925,7 @@ def _fast_read_excel(path: str, sheet_name=None, header: int = 0) -> pd.DataFram
     return pd.DataFrame(data, columns=cols)
 
 
-def _fast_write_excel(df: pd.DataFrame, path: str) -> None:
+def _fast_write_excel(df: pd.DataFrame, path: str) -> str:
     import openpyxl
     os.makedirs(os.path.dirname(path), exist_ok=True)
 
@@ -801,7 +936,18 @@ def _fast_write_excel(df: pd.DataFrame, path: str) -> None:
     ws.append(list(df2.columns))
     for row in df2.itertuples(index=False, name=None):
         ws.append(row)
-    wb.save(path)
+
+    target_path = path
+    try:
+        wb.save(target_path)
+    except PermissionError:
+        base, ext = os.path.splitext(path)
+        target_path = f"{base}_new{ext}"
+        print(f"\n[WARNING] File '{path}' sedang dibuka di aplikasi lain (Excel).")
+        print(f"          Menyimpan hasil ke file alternatif: '{target_path}'")
+        wb.save(target_path)
+
+    return target_path
 
 
 def process_data(input_file: str, output_file: str) -> None:
@@ -850,6 +996,8 @@ def process_data(input_file: str, output_file: str) -> None:
     insured_vals = df["insured_ori"].to_numpy()
     clsdt_polis_vals = df[CLSDT_POLICY_COL].to_numpy()
     clsdt_slip_vals  = df[CLSDT_SLIP_COL].to_numpy()
+    class_name_vals  = df["CLASS_NAME"].to_numpy() if "CLASS_NAME" in df.columns else np.array([None] * n)
+    fac_date_vals    = df["FAC_COM_DATE"].to_numpy() if "FAC_COM_DATE" in df.columns else np.array([None] * n)
 
     src_polis = {"CLSDT": 0, "FAC": 0}
     src_slip  = {"CLSDT": 0, "FAC": 0}
@@ -860,7 +1008,12 @@ def process_data(input_file: str, output_file: str) -> None:
             print(f"      Progress: {n_done:,} / {total_t:,} baris TOKIO diproses...")
 
         p_ori = polis_vals[pos]
-        c_polis, s_polis = clean_polis_clsdt(clsdt_polis_vals[pos], p_ori)
+        c_polis, s_polis = clean_polis_clsdt(
+            clsdt_polis_vals[pos],
+            p_ori,
+            class_name=class_name_vals[pos],
+            fac_com_date=fac_date_vals[pos],
+        )
         c_slip,  s_slip  = clean_slip_clsdt(clsdt_slip_vals[pos], slip_vals[pos])
         c_ins   = clean_insured(insured_vals[pos])
         c_cert  = clean_certificate(clsdt_polis_vals[pos])
@@ -922,13 +1075,13 @@ def process_data(input_file: str, output_file: str) -> None:
     df = df[OUTPUT_HEADERS + extra]
 
     print(f"[5/5] Menyimpan hasil cepat ke: {output_file} ...")
-    _fast_write_excel(df, output_file)
+    saved_path = _fast_write_excel(df, output_file)
 
     print(f"\n{'=' * 55}")
     print(f"  [OK] Selesai!")
     print(f"  Total baris output  : {len(df):,}")
     print(f"  Total kolom output  : {len(df.columns)}")
-    print(f"  File disimpan di    : {output_file}")
+    print(f"  File disimpan di    : {saved_path}")
     print(f"{'=' * 55}")
 
 

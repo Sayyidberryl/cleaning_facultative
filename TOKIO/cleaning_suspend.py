@@ -14,6 +14,9 @@ INPUT_FILE  = os.path.join("data_raw", "3b. Database Suspense 150826.xlsx")
 OUTPUT_FILE = os.path.join("data_cleaned", "tokio_output_suspend.xlsx")
 SHEET_NAME  = 0
 
+# Filter cedant: hanya proses dan simpan cedant Tokio
+CEDANT_KEYWORD = "TOKIO"
+
 # Header output suspend (urutan & nama kolom final)
 OUTPUT_HEADERS = [
     "RECEIPT NO", "CREDIT NOTES", "DETAIL RINCIAN NO", "RECEIPT DATE",
@@ -358,6 +361,25 @@ def process_data(input_file: str, output_file: str) -> None:
 
     print(f"      Data SUSPENSE : {total_sesudah:,} baris")
     print(f"      Data ADJUSTED : {total_adjusted:,} baris dibuang")
+
+    # ========================================================
+    # FILTER CEDANT - HANYA TOKIO
+    # CEDANT LAIN DIBUANG PERMANEN
+    # ========================================================
+    ced_cols = [c for c in df.columns if "CEDANT" in str(c).upper()]
+    if not ced_cols:
+        raise ValueError("Kolom CEDANT tidak ditemukan di data.")
+
+    mask_tokio = pd.Series(False, index=df.index)
+    for c in ced_cols:
+        mask_tokio |= df[c].fillna("").astype(str).str.upper().str.contains(CEDANT_KEYWORD)
+
+    total_sebelum_cedant = len(df)
+    df = df[mask_tokio].reset_index(drop=True)
+    total_non_tokio = total_sebelum_cedant - len(df)
+
+    print(f"      Data TOKIO    : {len(df):,} baris")
+    print(f"      Non-TOKIO     : {total_non_tokio:,} baris dibuang")
     print(f"[2/5] Total baris yang akan diproses: {len(df):,}")
 
     # Rename kolom asli -> _ori
@@ -372,10 +394,7 @@ def process_data(input_file: str, output_file: str) -> None:
         inplace=True,
     )
 
-    print(
-        "[3/5] Menjalankan proses cleaning hanya untuk baris TOKIO "
-        "(baris lain dibiarkan apa adanya) ..."
-    )
+    print("[3/5] Menjalankan proses cleaning untuk baris TOKIO ...")
 
     all_clean_polis = []
     all_clean_slip = []
@@ -440,7 +459,15 @@ def process_data(input_file: str, output_file: str) -> None:
     print(f"[5/5] Menyimpan hasil ke: {output_file} ...")
 
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
-    df.to_excel(output_file, index=False)
+    try:
+        df.to_excel(output_file, index=False)
+    except PermissionError:
+        base, ext = os.path.splitext(output_file)
+        alt_path = f"{base}_new{ext}"
+        print(f"\n[WARNING] File '{output_file}' sedang dibuka di aplikasi lain.")
+        print(f"          Menyimpan hasil ke file alternatif: '{alt_path}'")
+        df.to_excel(alt_path, index=False)
+        output_file = alt_path
 
     print(f"\n{'=' * 55}")
     print("  [OK] Selesai!")
