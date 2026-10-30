@@ -9,13 +9,44 @@ print("SCRIPT BERJALAN")
 # KONFIGURASI ETIQA
 # ============================================================
 
-INPUT_FILE = os.path.join("input", "3b. Database Suspense 150826.xlsx")
-OUTPUT_FILE = os.path.join("output", "etiqa_output_suspend_filter.xlsx")
+def _find_input_file(name: str) -> str:
+    candidates = [
+        os.path.join("input", name),
+        os.path.join(os.path.dirname(__file__), "input", name),
+        os.path.join("data_raw", name),
+        os.path.join(os.path.dirname(__file__), "..", "data_raw", name),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_SCRIPT_DIR)
+_OUTPUT_DIR = os.path.join(_ROOT_DIR, "data_cleaned")
+os.makedirs(_OUTPUT_DIR, exist_ok=True)
+
+INPUT_FILE = _find_input_file("3b. Database Suspense 150826.xlsx")
+OUTPUT_FILE = os.path.join(_OUTPUT_DIR, "etiqa_output_suspend.xlsx")
 SHEET_NAME = 0
 
 CEDANT_COL = "CEDANT NAME"
 CEDANT_VALUE = "PT. AS. ETIQA INT. IND.(EX. AS. ASOKA MAS)"
 
+# Header output suspend (urutan & nama kolom final sesuai Tokio reference)
+OUTPUT_HEADERS = [
+    "RECEIPT NO", "CREDIT NOTES", "DETAIL RINCIAN NO", "RECEIPT DATE",
+    "CEDANT NAME", "CEDANT SHRT NAME",
+    "INSURED", "INSURED_CLEAN",
+    "CURR ORI", "AMOUNT ORI", "CURR PAY", "AMOUNT PAY",
+    "POLIS", "POLIS_CLEAN", "CERTIFICATE_1",
+    "SLIP NO", "SLIP_NO_CLEAN",
+    "DESC 1", "DESC 2", "DESC 3", "DESC 4",
+    "STATUS", "REC_TYPE", "CEK FASE",
+]
+
+CLEAN_JOIN_SEP = "; "
 MAX_BREAKDOWN = 5
 
 
@@ -444,9 +475,13 @@ def process_data(input_file: str, output_file: str) -> None:
         .str.strip()
     )
 
+    total_input = len(df)
+    is_etiqa = cedant_series == CEDANT_VALUE
+    df = df[is_etiqa].copy().reset_index(drop=True)
+
     print(
-        f"[2/6] Data cedant "
-        f"'{CEDANT_VALUE}' : {len(df):,} baris"
+        f"[2/6] Filter cedant '{CEDANT_VALUE}': "
+        f"{len(df):,} baris ETIQA dari total {total_input:,} baris input."
     )
 
     # ========================================================
@@ -485,23 +520,14 @@ def process_data(input_file: str, output_file: str) -> None:
         s_ori = row.get("slip_ori", "")
         i_ori = row.get("insured_ori", "")
 
-        if cedant_series.loc[idx] == CEDANT_VALUE:
-
-            c_polis = clean_polis(p_ori)
-            c_slip = clean_slip(s_ori)
-            c_ins = clean_insured(
-                i_ori,
-                p_ori,
-                s_ori,
-            )
-            c_certificate = clean_certificate(p_ori)
-
-        else:
-
-            c_polis = []
-            c_slip = []
-            c_ins = []
-            c_certificate = ""
+        c_polis = clean_polis(p_ori)
+        c_slip = clean_slip(s_ori)
+        c_ins = clean_insured(
+            i_ori,
+            p_ori,
+            s_ori,
+        )
+        c_certificate = clean_certificate(p_ori)
 
         max_polis = max(
             max_polis,
@@ -538,82 +564,38 @@ def process_data(input_file: str, output_file: str) -> None:
     )
 
     # ========================================================
-    # SUSUN OUTPUT
+    # SUSUN OUTPUT SESUAI TOKIO REFERENCE
     # ========================================================
 
-    print("[4/6] Menyusun kolom output ...")
+    print("[4/6] Menyusun kolom output sesuai header reference Tokio ...")
 
-    df["CERTIFICATE"] = all_certificates
+    def _join(lst: list):
+        return CLEAN_JOIN_SEP.join(lst) if lst else None
 
-    new_columns = []
+    df["INSURED_CLEAN"] = [_join(x) for x in all_clean_ins]
+    df["POLIS_CLEAN"] = [_join(x) for x in all_clean_polis]
+    df["SLIP_NO_CLEAN"] = [_join(x) for x in all_clean_slip]
+    df["CERTIFICATE_1"] = all_certificates
 
-    for col in df.columns:
+    # Kembalikan nama kolom asli (sebelumnya di-rename jadi *_ori)
+    df = df.rename(columns={
+        "insured_ori": "INSURED",
+        "polis_ori": "POLIS",
+        "slip_ori": "SLIP NO",
+    })
 
-        if col == "CERTIFICATE":
-            continue
+    if "CEK FASE" not in df.columns:
+        df["CEK FASE"] = None
 
-        if col == "polis_ori":
+    missing = [c for c in OUTPUT_HEADERS if c not in df.columns]
+    for c in missing:
+        df[c] = None
 
-            new_columns.append(col)
+    extra = [c for c in df.columns if c not in OUTPUT_HEADERS]
+    if extra:
+        print(f"      [INFO] Kolom di luar header yang ditentukan: {extra}")
 
-            clean_polis_columns = _expand_clean_columns(
-                df,
-                all_clean_polis,
-                "polis",
-                max_polis,
-            )
-
-            if clean_polis_columns:
-
-                # Urutan:
-                # POLIS ORI
-                # clean polis 1
-                # CERTIFICATE
-                # clean polis 2
-                # clean polis 3 ...
-                new_columns.append(
-                    clean_polis_columns[0]
-                )
-
-                new_columns.append(
-                    "CERTIFICATE"
-                )
-
-                new_columns += (
-                    clean_polis_columns[1:]
-                )
-
-            else:
-                new_columns.append(
-                    "CERTIFICATE"
-                )
-
-        elif col == "slip_ori":
-
-            new_columns.append(col)
-
-            new_columns += _expand_clean_columns(
-                df,
-                all_clean_slip,
-                "slip",
-                max_slip,
-            )
-
-        elif col == "insured_ori":
-
-            new_columns.append(col)
-
-            new_columns += _expand_clean_columns(
-                df,
-                all_clean_ins,
-                "insured",
-                max_ins,
-            )
-
-        else:
-            new_columns.append(col)
-
-    df = df[new_columns]
+    df = df[OUTPUT_HEADERS + extra]
 
     # ========================================================
     # SAVE

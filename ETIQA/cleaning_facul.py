@@ -5,9 +5,26 @@ import pandas as pd
 
 # ============================================================
 # CONFIG
-# ============================================================
-INPUT_FILE = os.path.join("input", "1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
-OUTPUT_FILE = os.path.join("output", "etiqa_output_facul.xlsx")
+def _find_input_file(name: str) -> str:
+    candidates = [
+        os.path.join("input", name),
+        os.path.join(os.path.dirname(__file__), "input", name),
+        os.path.join("data_raw", name),
+        os.path.join(os.path.dirname(__file__), "..", "data_raw", name),
+    ]
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return candidates[0]
+
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DIR = os.path.dirname(_SCRIPT_DIR)
+_OUTPUT_DIR = os.path.join(_ROOT_DIR, "data_cleaned")
+os.makedirs(_OUTPUT_DIR, exist_ok=True)
+
+INPUT_FILE = _find_input_file("1b. Transaksi Facul 01.01.23 - 17.08.2026.xlsx")
+OUTPUT_FILE = os.path.join(_OUTPUT_DIR, "etiqa_output_facul.xlsx")
 
 CEDANT_COL = "COMP_NAME"
 CEDANT_VALUE = "PT. AS. ETIQA INT. IND.(EX. AS. ASOKA MAS)"
@@ -17,6 +34,37 @@ INSURED_COL = "FAC_INSURED"
 BROKER_NAME_COL = "COMP_NAME_1"
 BROKER_CODE_COL = "FAC_BROKER"
 MAX_SPLIT_COLS = 5
+
+# Header output FACUL (urutan & nama kolom final sesuai Tokio reference)
+OUTPUT_HEADERS = [
+    "FAC_CODE", "FAC_CEDANT", "COMP_NAME", "FAC_BROKER", "COMP_NAME.1",
+    "BUSINESS_PARTNERS",
+    "FAC_INSURED",
+    "FAC_INSURED_CLN_1", "FAC_INSURED_CLN_2", "FAC_INSURED_CLN_3",
+    "FAC_INSURED_CLN_4", "FAC_INSURED_CLN_5",
+    "FAC_POLICY_NO", "FAC_POLICY_CLEAN_1", "CERTIFICATE_1",
+    "FAC_POLICY_CLEAN_2", "FAC_POLICY_CLEAN_3",
+    "FAC_POLICY_CLEAN_4", "FAC_POLICY_CLEAN_5",
+    "FAC_SLIP",
+    "FAC_SLIP_CLEAN_1", "FAC_SLIP_CLEAN_2", "FAC_SLIP_CLEAN_3",
+    "FAC_SLIP_CLEAN_4", "FAC_SLIP_CLEAN_5",
+    "FAC_CURRENCY", "FAC_INP_DATE", "FAC_COM_DATE", "FAC_EXP_DATE",
+    "FAC_SUB_CLASS", "FAC_RISK", "FAC_DESC", "FAC_ACC_STS", "FAC_STS_SLIP",
+]
+
+# Nama internal -> nama header final sesuai Tokio reference
+_HEADER_RENAME = {
+    "polis_ori": "FAC_POLICY_NO",
+    "slip_ori": "FAC_SLIP",
+    "insured_ori": "FAC_INSURED",
+    "BUSINESS PARTNERS": "BUSINESS_PARTNERS",
+    "COMP_NAME_1": "COMP_NAME.1",
+    "COMP_NAME.1": "COMP_NAME.1",
+    **{f"clean polis {i}": f"FAC_POLICY_CLEAN_{i}" for i in range(1, 6)},
+    **{f"Certificate {i}": f"CERTIFICATE_{i}" for i in range(1, 4)},
+    **{f"clean slip {i}": f"FAC_SLIP_CLEAN_{i}" for i in range(1, 6)},
+    **{f"clean insured {i}": f"FAC_INSURED_CLN_{i}" for i in range(1, 6)},
+}
 
 POLIS_EXCEPTION_RE = re.compile(
     r"MOP\s*MARINE|(?:LINE\s*SLIP|LINESLIP)|\b(?:P1|P2|P3|P73)\s*CANCEL\b|\b(?:P1|P2|P3|P73)\b|\bCANCEL\b|PENYELESAIAN(?:\s+SUSPENSE)?|HUTANG|UTANG",
@@ -1506,7 +1554,16 @@ def _fast_write_excel(df, path):
                 cell.number_format = "@"
             out.append(cell)
         ws.append(out)
-    wb.save(path)
+    try:
+        wb.save(path)
+    except PermissionError:
+        base, ext = os.path.splitext(path)
+        alt_path = f"{base}_new{ext}"
+        print(f"\n[WARNING] File '{path}' sedang dibuka di aplikasi lain.")
+        print(f"          Menyimpan hasil ke file alternatif: '{alt_path}'")
+        wb.save(alt_path)
+        return alt_path
+    return path
 
 
 # ============================================================
@@ -1534,7 +1591,16 @@ def process_data(input_file, output_file):
     cedant_value_normalized = CEDANT_VALUE.upper().replace(".", "")
     is_etiqa = df[CEDANT_COL].eq(cedant_value_normalized)
     total_etiqa = int(is_etiqa.sum())
-    print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {total_etiqa:,} baris ETIQA dari total {len(df):,} baris.")
+    total_input = len(df)
+    print(f"[2/5] Filter cedant '{CEDANT_VALUE}': {total_etiqa:,} baris ETIQA dari total {total_input:,} baris.")
+
+    if total_etiqa == 0:
+        print("[WARNING] Tidak ditemukan data cedant Etiqa!")
+        return
+
+    # FILTER DATAFRAME HANYA CEDANT ETIQA
+    df = df[is_etiqa].copy().reset_index(drop=True)
+    print(f"      Data difilter: output HANYA baris Etiqa ({len(df):,} baris).")
 
     broker_name_s = df[BROKER_NAME_COL].fillna("").astype(str).str.strip()
     broker_code_s = df[BROKER_CODE_COL].fillna("").astype(str).str.strip()
@@ -1556,14 +1622,13 @@ def process_data(input_file, output_file):
     all_certificates = [[] for _ in range(n)]
     max_polis = max_slip = max_ins = 1
 
-    etiqa_idx = np.flatnonzero(is_etiqa.to_numpy())
     polis_vals = df["polis_ori"].to_numpy()
     slip_vals = df["slip_ori"].to_numpy()
     insured_vals = df["insured_ori"].to_numpy()
 
-    for n_done, pos in enumerate(etiqa_idx, 1):
-        if n_done % 5000 == 0:
-            print(f"      Progress: {n_done:,} / {total_etiqa:,} baris ETIQA diproses...")
+    for pos in range(n):
+        if (pos + 1) % 5000 == 0 or (pos + 1) == n:
+            print(f"      Progress: {pos + 1:,} / {n:,} baris ETIQA diproses...")
         # ========================================================
         # POLIS + CERTIFICATE HARUS DIPASANGKAN
         # ========================================================
@@ -1619,12 +1684,6 @@ def process_data(input_file, output_file):
         all_clean_slip[pos] = c_slip
         all_clean_ins[pos] = c_ins
         all_certificates[pos] = c_cert
-        max_slip = max(max_slip, len(c_slip))
-        max_ins = max(max_ins, len(c_ins))
-        all_clean_polis[pos] = c_polis
-        all_clean_slip[pos] = c_slip
-        all_clean_ins[pos] = c_ins
-        all_certificates[pos] = c_cert
 
     print(f"      Selesai diproses! polis={max_polis}, slip={max_slip}, insured={max_ins}")
 
@@ -1647,7 +1706,7 @@ def process_data(input_file, output_file):
         ]
     new_columns = []
     for col in df.columns:
-        if col == "CERTIFICATE":
+        if col == "CERTIFICATE" or col.startswith("Certificate "):
             continue
         new_columns.append(col)
         if col == "polis_ori":
@@ -1686,9 +1745,22 @@ def process_data(input_file, output_file):
             new_columns += _insert_clean_columns(df, all_clean_ins, "insured", max_ins)
 
     df = df[new_columns]
+
+    # Ganti nama kolom sesuai header final Tokio reference & urutkan
+    df = df.rename(columns=_HEADER_RENAME)
+
+    missing = [c for c in OUTPUT_HEADERS if c not in df.columns]
+    for c in missing:
+        df[c] = None
+
+    extra = [c for c in df.columns if c not in OUTPUT_HEADERS]
+    if extra:
+        print(f"      [INFO] Kolom di luar header yang ditentukan: {extra}")
+
+    df = df[OUTPUT_HEADERS + extra]
     print(f"[5/5] Menyimpan hasil ke: {output_file} ...")
     _fast_write_excel(df, output_file)
-    print(f"[OK] Selesai. Total baris={len(df):,}, kolom={len(df.columns)}, ETIQA={total_etiqa:,}")
+    print(f"[OK] Selesai. Total baris input={total_input:,}, output (Hanya Etiqa)={len(df):,}, kolom={len(df.columns)}")
 
 
 # ============================================================

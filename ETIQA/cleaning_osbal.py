@@ -11,15 +11,25 @@ import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
 
-INPUT_FILE = (
-    BASE_DIR
-    / "input"
-    / "2b. transaksi Osbal 01.01.23 - 17.08.26.xlsx"
-)
+
+def _find_input_file(name: str) -> Path:
+    candidates = [
+        BASE_DIR / "input" / name,
+        BASE_DIR.parent / "input" / name,
+        BASE_DIR.parent / "data_raw" / name,
+        BASE_DIR / "data_raw" / name,
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return candidates[0]
+
+
+INPUT_FILE = _find_input_file("2b. transaksi Osbal 01.01.23 - 17.08.26.xlsx")
 
 OUTPUT_FILE = (
-    BASE_DIR
-    / "output"
+    BASE_DIR.parent
+    / "data_cleaned"
     / "etiqa_output_osbal.xlsx"
 )
 
@@ -34,6 +44,39 @@ INSURED_COL = "FAC_INSURED"
 CLSDT_SERTF_COL = "CLSDT_SERTF_NO"
 
 MAX_SPLIT_COLS = 5
+
+# Header output OSBAL (urutan & nama kolom final sesuai Tokio reference)
+OUTPUT_HEADERS = [
+    "CCOS_DOC_NO", "CCOS_DATE", "CCOS_REF_CODE", "CCOS_COMP", "CCOS_COMP_NAME",
+    "CCOS_REF_COMP", "CCOS_REF_COMP_NAME",
+    "FAC_INSURED",
+    "FAC_INSURED_CLN_1", "FAC_INSURED_CLN_2", "FAC_INSURED_CLN_3",
+    "FAC_INSURED_CLN_4", "FAC_INSURED_CLN_5",
+    "CCOS_CURR", "CCOS_OR_BAL", "CCOS_BAL_DUE",
+    "CCOS_OR_BAL_IN_IDR", "CCOS_BAL_DUE_IN_IDR",
+    "FAC_COM_DATE", "FAC_EXP_DATE", "FAC_DUE_DATES", "FAC_SUB_CLASS",
+    "FAC_POLICY_NO", "FAC_POLICY_NO_CLEAN_1", "CERTIFICATE_1",
+    "FAC_POLICY_NO_CLEAN_2", "FAC_POLICY_NO_CLEAN_3",
+    "FAC_POLICY_NO_CLEAN_4", "FAC_POLICY_NO_CLEAN_5",
+    "FAC_SLIP",
+    "FAC_SLIP_CLEAN_1", "FAC_SLIP_CLEAN_2", "FAC_SLIP_CLEAN_3",
+    "FAC_SLIP_CLEAN_4", "FAC_SLIP_CLEAN_5",
+    "CLASS_CODE", "CLASS_NAME",
+    "CLSDT_POLICY_NO", "CLSDT_SLIP_NO", "CLSDT_SERTF_NO",
+]
+
+# Nama internal -> nama header final sesuai Tokio reference
+_HEADER_RENAME = {
+    "polis_ori": "FAC_POLICY_NO",
+    "slip_ori": "FAC_SLIP",
+    "insured_ori": "FAC_INSURED",
+    "certificate 1": "CERTIFICATE_1",
+    "Certificate 1": "CERTIFICATE_1",
+    "CERTIFICATE": "CERTIFICATE_1",
+    **{f"clean polis {i}": f"FAC_POLICY_NO_CLEAN_{i}" for i in range(1, 6)},
+    **{f"clean slip {i}": f"FAC_SLIP_CLEAN_{i}" for i in range(1, 6)},
+    **{f"clean insured {i}": f"FAC_INSURED_CLN_{i}" for i in range(1, 6)},
+}
 
 
 
@@ -2499,23 +2542,19 @@ def process_data(
         f"{jumlah_non_etiqa:,}"
     )
 
-    print(
-        "      Semua baris tetap dipertahankan."
-    )
-
     if jumlah_etiqa == 0:
 
         print(
             "\n[WARNING] Cedant Etiqa tidak ditemukan."
         )
 
-        print(
-            "          Tidak ada baris yang menjalankan cleansing."
-        )
+        return
 
-        print(
-            "          Semua data tetap dipertahankan."
-        )
+    # FILTER DATAFRAME HANYA CEDANT ETIQA
+    df = df[is_etiqa].copy().reset_index(drop=True)
+    print(
+        f"      Data difilter: output HANYA baris Etiqa ({len(df):,} baris)."
+    )
 
     # ========================================================
     # RENAME KOLOM
@@ -2563,21 +2602,6 @@ def process_data(
         df[CLSDT_SERTF_COL].tolist()
     )
 
-    is_etiqa_list = (
-        is_etiqa.tolist()
-    )
-
-    # ========================================================
-    # HASIL CLEANING
-    # ========================================================
-
-    all_clean_polis = []
-    all_clean_slip = []
-    all_clean_ins = []
-
-    # CERTIFICATE PER CLEAN POLIS
-    all_certificates_per_polis = []
-
     total_etiqa_processed = 0
 
     total_clstd_polis_used = 0
@@ -2588,15 +2612,20 @@ def process_data(
 
     total_rows = len(df)
 
+    all_clean_polis = []
+    all_clean_slip = []
+    all_clean_ins = []
+    all_certificates_per_polis = []
+
     # ========================================================
-    # LOOP SEMUA BARIS
+    # LOOP SEMUA BARIS ETIQA
     # ========================================================
 
     for idx in range(total_rows):
 
         if (
             idx + 1
-        ) % 50_000 == 0:
+        ) % 5000 == 0 or (idx + 1) == total_rows:
 
             print(
                 f"      Progress: "
@@ -2605,120 +2634,102 @@ def process_data(
                 f"baris diproses..."
             )
 
-        # ====================================================
-        # HANYA ETIQA
-        # ====================================================
+        total_etiqa_processed += 1
 
-        if is_etiqa_list[idx]:
+        # ------------------------------------------------
+        # POLIS
+        # ------------------------------------------------
 
-            total_etiqa_processed += 1
+        p_ori = (
+            polis_ori_list[idx]
+        )
 
-            # ------------------------------------------------
-            # POLIS
-            # ------------------------------------------------
+        c_p_no = (
+            clsdt_polis_list[idx]
+        )
 
-            p_ori = (
-                polis_ori_list[idx]
+        polis_source, polis_source_name = (
+            _get_clstd_source(
+                c_p_no,
+                p_ori,
             )
+        )
 
-            c_p_no = (
-                clsdt_polis_list[idx]
-            )
+        if (
+            polis_source_name
+            == "CLSDT"
+        ):
 
-            polis_source, polis_source_name = (
-                _get_clstd_source(
-                    c_p_no,
-                    p_ori,
-                )
-            )
-
-            if (
-                polis_source_name
-                == "CLSDT"
-            ):
-
-                total_clstd_polis_used += 1
-
-            else:
-
-                total_fallback_polis_fac += 1
-
-            c_polis = clean_polis(
-                polis_source
-            )
-
-            # ------------------------------------------------
-            # CERTIFICATE
-            #
-            # Certificate diambil dari POLIS ORI.
-            # Certificate merupakan bagian setelah tanda "-"
-            # pada polis_ori.
-            #
-            # Urutannya mengikuti hasil extraction certificate.
-            # ------------------------------------------------
-
-            c_certificates = (
-                _extract_certificate_list(
-                    p_ori
-                )
-            )
-
-            # Maksimal 3 certificate
-            c_certificates = c_certificates[:3]
-            # ------------------------------------------------
-            # SLIP
-            # ------------------------------------------------
-
-            s_ori = (
-                slip_ori_list[idx]
-            )
-
-            c_s_no = (
-                clsdt_slip_list[idx]
-            )
-
-            slip_source, slip_source_name = (
-                _get_clstd_source(
-                    c_s_no,
-                    s_ori,
-                )
-            )
-
-            if (
-                slip_source_name
-                == "CLSDT"
-            ):
-
-                total_clstd_slip_used += 1
-
-            else:
-
-                total_fallback_slip_fac += 1
-
-            c_slip = clean_slip(
-                slip_source
-            )
-
-            # ------------------------------------------------
-            # INSURED
-            # ------------------------------------------------
-
-            c_ins = clean_insured(
-                insured_ori_list[idx]
-            )
-
-        # ====================================================
-        # CEDANT LAIN
-        #
-        # JANGAN DICLEAN.
-        # ====================================================
+            total_clstd_polis_used += 1
 
         else:
 
-            c_polis = []
-            c_slip = []
-            c_ins = []
-            c_certificates = []
+            total_fallback_polis_fac += 1
+
+        c_polis = clean_polis(
+            polis_source
+        )
+
+        # ------------------------------------------------
+        # CERTIFICATE
+        #
+        # Certificate diambil dari POLIS ORI.
+        # Certificate merupakan bagian setelah tanda "-"
+        # pada polis_ori.
+        #
+        # Urutannya mengikuti hasil extraction certificate.
+        # ------------------------------------------------
+
+        c_certificates = (
+            _extract_certificate_list(
+                p_ori
+            )
+        )
+
+        # Maksimal 3 certificate
+        c_certificates = c_certificates[:3]
+
+        # ------------------------------------------------
+        # SLIP
+        # ------------------------------------------------
+
+        s_ori = (
+            slip_ori_list[idx]
+        )
+
+        c_s_no = (
+            clsdt_slip_list[idx]
+        )
+
+        slip_source, slip_source_name = (
+            _get_clstd_source(
+                c_s_no,
+                s_ori,
+            )
+        )
+
+        if (
+            slip_source_name
+            == "CLSDT"
+        ):
+
+            total_clstd_slip_used += 1
+
+        else:
+
+            total_fallback_slip_fac += 1
+
+        c_slip = clean_slip(
+            slip_source
+        )
+
+        # ------------------------------------------------
+        # INSURED
+        # ------------------------------------------------
+
+        c_ins = clean_insured(
+            insured_ori_list[idx]
+        )
 
         # ====================================================
         # SIMPAN HASIL
@@ -3018,6 +3029,19 @@ def process_data(
         new_columns
     ]
 
+    # Ganti nama kolom sesuai header final Tokio reference & urutkan
+    df = df.rename(columns=_HEADER_RENAME)
+
+    missing = [c for c in OUTPUT_HEADERS if c not in df.columns]
+    for c in missing:
+        df[c] = None
+
+    extra = [c for c in df.columns if c not in OUTPUT_HEADERS]
+    if extra:
+        print(f"      [INFO] Kolom di luar header yang ditentukan: {extra}")
+
+    df = df[OUTPUT_HEADERS + extra]
+
     # ========================================================
     # VALIDASI JUMLAH BARIS
     # ========================================================
@@ -3079,15 +3103,15 @@ def process_data(
     # VALIDASI FATAL
     # ========================================================
 
-    if len(df) != original_row_count:
+    if len(df) != jumlah_etiqa:
 
         print(
             "\n[ERROR FATAL]"
         )
 
         print(
-            f"Baris input  : "
-            f"{original_row_count:,}"
+            f"Baris Etiqa  : "
+            f"{jumlah_etiqa:,}"
         )
 
         print(
@@ -3101,7 +3125,7 @@ def process_data(
 
         raise RuntimeError(
             "Jumlah baris output berbeda "
-            "dengan jumlah baris input!"
+            "dengan jumlah baris Etiqa!"
         )
 
     print(
@@ -3109,12 +3133,12 @@ def process_data(
     )
 
     print(
-        f"{original_row_count:,} = "
+        f"{jumlah_etiqa:,} = "
         f"{len(df):,}"
     )
 
     print(
-        "Semua baris input tetap dipertahankan."
+        "Semua baris Etiqa berhasil diproses dan disimpan."
     )
 
     # ========================================================
@@ -3165,18 +3189,13 @@ def process_data(
     )
 
     print(
-        f"Total baris output : "
+        f"Total baris output (Hanya Etiqa) : "
         f"{len(df):,}"
     )
 
     print(
         f"Baris Etiqa        : "
         f"{jumlah_etiqa:,}"
-    )
-
-    print(
-        f"Cedant lain        : "
-        f"{jumlah_non_etiqa:,}"
     )
 
     print(
