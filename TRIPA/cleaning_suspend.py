@@ -40,6 +40,12 @@ _INSURED_TAIL_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+
+# Regex pembersih catatan mutasi / rekening internal perbankan
+_BANK_NOTES_RE = re.compile(
+    r"[-–/\s]*(?:rekening\s+antar\s+(?:kantor|cabang)|RAK\b).*",
+    re.IGNORECASE,
+)
 _INSURED_JUNK_WORDS = frozenset({
     "SHANGHAI", "PR OF CHINA", "CHINA", "INDONESIA", "JAKARTA",
     "OFFICERS", "EMPLOYEES", "ALL OTHER CONTRACTORS",
@@ -268,6 +274,7 @@ def _remove_polis_slip_from_text(text: str, polis_ori, slip_ori) -> str:
 
 def _normalize_insured_part(p: str) -> str:
     """Terapkan sub-removal dan normalisasi pada satu bagian nama insured."""
+    p = _BANK_NOTES_RE.sub("", p)
     p = _INSURED_TAIL_RE.sub("", p)
     p = _INSURED_TITLE_RE.sub("", p)
     p = re.sub(r"\bKB\b", "", p, flags=re.IGNORECASE)
@@ -361,6 +368,7 @@ def clean_insured(val, polis_ori, slip_ori) -> list:
 
     # General cleaning
     val = _remove_polis_slip_from_text(val, polis_ori, slip_ori)
+    val = _BANK_NOTES_RE.sub("", val)
     val = _INSURED_TAIL_RE.sub("", val)
     val = re.sub(r"\([^)]*\)", "", val)
 

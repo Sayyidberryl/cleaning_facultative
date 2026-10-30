@@ -440,8 +440,33 @@ def clean_polis_raw(val) -> list:
         if results:
             return results
 
-    if original == "207010423000-08+09+207010223000-08+09":
-        return [original]
+    if '-' in original and '+' in original:
+        parts = re.split(r'\s*\+\s*', original)
+        results = []
+        current_base = None
+        valid = True
+        for part in parts:
+            part = part.strip()
+            if not part: continue
+            if '-' in part:
+                subparts = part.split('-')
+                if len(subparts) == 2:
+                    base = re.sub(r'[^A-Z0-9]', '', subparts[0])
+                    suffix = re.sub(r'[^A-Z0-9]', '', subparts[1])
+                    current_base = base
+                    results.append(base + suffix)
+                else:
+                    valid = False
+                    break
+            else:
+                if current_base:
+                    suffix = re.sub(r'[^A-Z0-9]', '', part)
+                    results.append(current_base + suffix)
+                else:
+                    valid = False
+                    break
+        if valid and results:
+            return results
 
     if original == "SUSPENSE VARIOUS CEDANT 2018-2019":
         return [original]
@@ -805,10 +830,7 @@ def clean_polis(val) -> list:
     if not original:
         return []
 
-    if original in {
-        "207010423000-08+09+207010223000-08+09",
-        "SUSPENSE VARIOUS CEDANT 2018-2019",
-    }:
+    if original == "SUSPENSE VARIOUS CEDANT 2018-2019":
         return [original]
 
     original = re.sub(
@@ -827,6 +849,15 @@ def clean_polis(val) -> list:
 
     original = re.sub(
         r"\s*-\s*(?:VAR|VARIOUS)\s*$",
+        "",
+        original,
+        flags=re.IGNORECASE,
+    ).strip()
+
+    # Hapus daftar sertifikat setelah dash yang dipisahkan koma
+    # Contoh: "10703082400027 - 00009,000010,000012" -> "10703082400027"
+    original = re.sub(
+        r"\s*-\s*\d+(?:\s*,\s*\d+)+.*$",
         "",
         original,
         flags=re.IGNORECASE,
@@ -1739,13 +1770,20 @@ def clean_certificate(polis_ori):
             if cert_left and cert_right:
                 return f"{cert_left} SD {cert_right}"
 
-    # 5. Handling Single Certificate (Pemisah Dash)
+    # 5. Handling Multi Certificate (Pemisah Koma)
+    # Wajib angka yang dipisahkan oleh koma (contoh: - 00009,000010,000012)
+    m_multi = re.search(r"-\s*(\d+(?:\s*,\s*\d+)+)$", polis_clean)
+    if m_multi:
+        parts = m_multi.group(1).split(',')
+        return ", ".join(p.strip().zfill(6) for p in parts)
+
+    # 6. Handling Single Certificate (Pemisah Dash)
     # Wajib 4 - 6 digit angka untuk membedakan dari pecahan polis (seperti -020, -022)
     m_single_dash = re.search(r"-(\d{4,6})$", polis_clean)
     if m_single_dash:
         return m_single_dash.group(1).zfill(6)
 
-    # 6. Handling Single Certificate (Pemisah Spasi)
+    # 7. Handling Single Certificate (Pemisah Spasi)
     m_single_space = re.search(r"(?<=\s)(\d{4,6})$", polis_clean)
     if m_single_space:
         return m_single_space.group(1).zfill(6)
